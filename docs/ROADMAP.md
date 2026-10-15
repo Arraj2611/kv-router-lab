@@ -14,9 +14,9 @@ Work top to bottom unless the owner says otherwise. Each task lists what "done" 
 
 ### 2. Engine parity check
 The Python and JS engines must agree on strategy ranking.
-- [ ] `tools/parity_check.js` (Node, no dependencies): extracts the engine from `index.html`, runs all six strategies at 6 and 20 req/s with default settings, writes JSON
-- [ ] `tools/parity_check.py`: runs the Python CLI with the same settings, compares rankings by p99 TTFT and by hit rate, exits non-zero on a mismatch
-- [ ] GitHub Action runs it on every push and pull request
+- [x] `tools/parity_check.js` (Node, no dependencies): extracts the engine from `index.html`, runs all six strategies at 6 and 20 req/s with default settings, writes JSON
+- [x] `tools/parity_check.py`: runs the Python CLI with the same settings, compares rankings by p99 TTFT and by hit rate, exits non-zero on a mismatch
+- [x] GitHub Action runs it on every push and pull request
 
 **Done when:** CI is green and a deliberately broken strategy in one engine makes it fail.
 
