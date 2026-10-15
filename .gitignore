@@ -3,3 +3,5 @@ __pycache__/
 .DS_Store
 .venv/
 .claude/settings.local.json
+tools/parity_js.json
+tools/golden_js.json

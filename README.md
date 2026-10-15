@@ -47,12 +47,12 @@ The browser engine is a JavaScript port of the Python simulator and produces the
 
 | Strategy | Cache hits | TTFT p50 | TTFT p99 | Load imbalance |
 | --- | --- | --- | --- | --- |
-| Round-robin | 69.9% | 2.38 s | 16.66 s | 1.03× |
-| Least-loaded | 70.0% | 1.15 s | 9.09 s | 1.05× |
-| Sticky session | 75.2% | 0.55 s | 12.07 s | 1.08× |
-| Prefix hash | 75.3% | 172 s | 594 s | 2.21× |
-| Approximate prefix tree | 74.9% | 0.40 s | 3.33 s | 1.08× |
-| **KV-aware cost** | **76.2%** | **0.22 s** | **1.63 s** | 1.07× |
+| Round-robin | 63.1% | 1.26 s | 16.99 s | 1.01× |
+| Least-loaded | 63.0% | 0.76 s | 11.86 s | 1.04× |
+| Sticky session | 69.3% | 0.64 s | 10.84 s | 1.11× |
+| Prefix hash | 70.8% | 432.5 s | 1414.3 s | 3.54× |
+| Approximate prefix tree | 69.2% | 0.41 s | 2.55 s | 1.10× |
+| **KV-aware cost** | **70.9%** | **0.23 s** | **1.06 s** | 1.11× |
 
 Full numbers for three load levels are in [`sim/results.csv`](sim/results.csv).
 

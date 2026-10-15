@@ -45,7 +45,7 @@ python -m http.server 8000                             # then open http://localh
 - Each replica: FIFO prefill, one request at a time; prefill time = `overhead + uncached_tokens / prefill_tps`. Decode is not modelled. TTFT = queue wait + prefill.
 - LRU eviction; on admit, blocks are touched deepest-first so shared prefixes are evicted last.
 - Workload: Poisson session arrivals, Zipf product popularity, 1..max_turns turns, exponential think time; each turn's answer joins the history.
-- Default seed 7. Both engines use their own RNG, so exact numbers differ between Python and JS; **strategy ranking** must match.
+- Default seed 7. Both engines are deterministic twins: the Python engine ports the JS engine's PRNG (mulberry32), hash function (`h32`, used only by the consistent-hash ring), and block-identity formula call-for-call, so the same config and seed produce numerically identical results (within float rounding), not just matching rank. `tools/parity_check.js`/`.py` enforce this — a golden-sequence check first (first 1000 RNG draws, first 200 request fields), then per-strategy metrics within 1e-6 relative — using the shared `tools/parity_config.json`, not either engine's own defaults.
 
 ## The page (`index.html`)
 

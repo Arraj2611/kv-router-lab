@@ -7,15 +7,22 @@ cache of fixed capacity with LRU eviction. Reports cache hit rate,
 time-to-first-token (TTFT) and load imbalance.
 
 Model (deliberately simple; see README for limits):
-- Prompts are split into blocks of BLOCK tokens. Each full block is identified
-  by a chained hash (previous block's hash + its own content), as in vLLM, so a
-  block only matches when its whole history matches. The partial last block is
-  never cached.
+- Prompts are split into blocks of BLOCK tokens. Each full block gets a
+  positional id: system-prompt blocks are keyed by (product, index) so every
+  session of a product shares them; blocks past the system prompt are keyed
+  by (session, index) so they're private to that session. A block matches
+  only if every earlier block in the prompt also matches (vLLM-style chained
+  identity). The partial last block is never cached.
 - Each replica runs prefill one request at a time, FIFO. Prefill time grows with
   the number of uncached tokens. Decode is assumed to overlap through batching
   and is not modelled. TTFT = queueing delay + prefill time.
 - Workload: several products (system prompts) with Zipf popularity. Each user
   session is a multi-turn chat whose history grows on top of its system prompt.
+
+This engine is a deterministic port of the JS engine in index.html: same
+PRNG (mulberry32), same hash function (for the consistent-hash ring), same
+block-identity formula, same draw order. Given the same config and seed, the
+two engines produce numerically identical results (see tools/parity_check.*).
 
 Usage:
     python cache_router_sim.py
@@ -27,17 +34,65 @@ from __future__ import annotations
 import argparse
 import bisect
 import csv
-import hashlib
-import random
-from collections import OrderedDict
 from dataclasses import dataclass
 
 BLOCK = 16  # tokens per KV block
+SESS_BASE = 1_000_000_000
 
 
-def stable_hash(*parts) -> int:
-    """Deterministic 64-bit hash (Python's built-in hash is salted per process)."""
-    return int.from_bytes(hashlib.blake2b(repr(parts).encode(), digest_size=8).digest(), "big")
+# --------------------------------------------------------------------------- RNG (mulberry32, ported from index.html's `rng`)
+
+def _imul32(a: int, b: int) -> int:
+    """Emulates JS Math.imul: 32-bit wraparound multiply. Sign-agnostic: the
+    low 32 bits of a product are the same whether operands are read as signed
+    or unsigned, so plain unsigned arithmetic reproduces the same bit pattern."""
+    return (a * b) & 0xFFFFFFFF
+
+
+def make_rng(seed: int):
+    """Direct port of index.html's `rng(seed)` (mulberry32). Bit-identical
+    output to the JS version for the same seed and call count."""
+    state = [seed & 0xFFFFFFFF]
+
+    def r() -> float:
+        state[0] = (state[0] + 0x6D2B79F5) & 0xFFFFFFFF
+        a = state[0]
+        t = _imul32(a ^ (a >> 15), (1 | a) & 0xFFFFFFFF)
+        old_t = t
+        t = (t + _imul32(t ^ (t >> 7), (61 | t) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        t = t ^ old_t
+        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296
+
+    return r
+
+
+def _h32(a: int, b: int) -> int:
+    """Direct port of index.html's `h32` (used only for the consistent-hash
+    ring, never for block identity)."""
+    x = (_imul32((a & 0xFFFFFFFF) ^ 0x9E3779B9, 0x85EBCA6B) ^ (b & 0xFFFFFFFF)) & 0xFFFFFFFF
+    x ^= x >> 13
+    x &= 0xFFFFFFFF
+    x = _imul32(x, 0xC2B2AE35)
+    x ^= x >> 16
+    return x & 0xFFFFFFFF
+
+
+def _js_expo(r, rate: float) -> float:
+    import math
+    return -math.log(1 - r()) / rate
+
+
+def _js_randint(r, a: int, b: int) -> int:
+    return a + int(r() * (b - a + 1))
+
+
+def _bh(sys_full: int, product: int, session: int, i: int) -> int:
+    """Block identity: a plain positional id, not a content hash. System-prompt
+    blocks are shared across every session of the product; later blocks are
+    private to the session."""
+    if i < sys_full:
+        return product * 100_000 + i + 1
+    return SESS_BASE + session * 10_000 + i
 
 
 # --------------------------------------------------------------------------- workload
@@ -48,46 +103,50 @@ class Request:
     session: int
     product: int
     tokens: int       # full prompt length
-    hashes: list      # chained hashes of the prompt's full blocks
+    sys_full: int     # number of full system-prompt blocks
+    n: int            # number of full blocks in the prompt
 
 
-def generate_workload(args, rng: random.Random) -> list[Request]:
-    # System prompts: one per product, Zipf popularity (product 0 is the hottest).
-    sys_len = [rng.randint(args.sys_min, args.sys_max) for _ in range(args.products)]
-    sys_chain = []
-    for p, n_tok in enumerate(sys_len):
-        chain, prev = [], 0
-        for i in range(n_tok // BLOCK):
-            prev = stable_hash("sys", p, i, prev)
-            chain.append(prev)
-        sys_chain.append(chain)
-    weights = [1 / (k + 1) ** args.zipf for k in range(args.products)]
+def generate_workload(args) -> list[Request]:
+    r = make_rng(args.seed)
+    products = args.products
 
-    # Sessions arrive as a Poisson process; each runs several turns.
-    mean_turns = (1 + args.max_turns) / 2
-    session_rate = args.rate / mean_turns
+    sys_len = [_js_randint(r, args.sys_min, args.sys_max) for _ in range(products)]
+
+    w = []
+    ws = 0.0
+    for k in range(products):
+        v = 1 / pow(k + 1, args.zipf)
+        w.append(v)
+        ws += v
+
+    def pick() -> int:
+        x = r() * ws
+        for k in range(products):
+            x -= w[k]
+            if x <= 0:
+                return k
+        return products - 1
+
+    session_rate = args.rate / ((1 + args.max_turns) / 2)
     requests: list[Request] = []
     t, sid = 0.0, 0
     while True:
-        t += rng.expovariate(session_rate)
+        t += _js_expo(r, session_rate)
         if t > args.duration:
             break
-        p = rng.choices(range(args.products), weights)[0]
-        chain = list(sys_chain[p])      # this session's own hash chain, extended lazily
-        history = sys_len[p]            # tokens already in the conversation
+        p = pick()
+        history = sys_len[p]
         turn_t = t
-        for _ in range(rng.randint(1, args.max_turns)):
-            user = rng.randint(30, 300)
-            prompt_tokens = history + user
-            full_blocks = prompt_tokens // BLOCK
-            while len(chain) < full_blocks:  # blocks past the system prompt are session-specific
-                chain.append(stable_hash("sess", sid, len(chain), chain[-1] if chain else 0))
+        turns = _js_randint(r, 1, args.max_turns)
+        for _ in range(turns):
+            tok = history + _js_randint(r, 30, 300)
             if turn_t <= args.duration:
-                requests.append(Request(turn_t, sid, p, prompt_tokens, chain[:full_blocks]))
-            history = prompt_tokens + rng.randint(100, 500)   # model's answer joins the history
-            turn_t += rng.expovariate(1 / args.think_time)
+                requests.append(Request(turn_t, sid, p, tok, sys_len[p] // BLOCK, tok // BLOCK))
+            history = tok + _js_randint(r, 100, 500)
+            turn_t += _js_expo(r, 1 / args.think_time)
         sid += 1
-    requests.sort(key=lambda r: r.t)
+    requests.sort(key=lambda req: req.t)
     return requests
 
 
@@ -95,30 +154,30 @@ def generate_workload(args, rng: random.Random) -> list[Request]:
 
 class Replica:
     def __init__(self, capacity_blocks: int):
-        self.cache: OrderedDict[int, None] = OrderedDict()  # LRU: front = evicted first
+        self.cache: dict[int, None] = {}  # insertion order = LRU order; front = evicted first
         self.capacity = capacity_blocks
         self.free_at = 0.0       # when the prefill queue drains
         self.busy_time = 0.0     # total prefill work done (s)
 
-    def match(self, hashes: list) -> int:
+    def match(self, req: Request) -> int:
         """Number of leading blocks already cached."""
         n = 0
-        for h in hashes:
-            if h not in self.cache:
+        for i in range(req.n):
+            if _bh(req.sys_full, req.product, req.session, i) not in self.cache:
                 break
             n += 1
         return n
 
-    def admit(self, hashes: list) -> None:
+    def admit(self, req: Request) -> None:
         # Touch deepest blocks first so the shared beginning ends up most recent:
         # leaves are evicted before the prefixes they hang off.
-        for h in reversed(hashes):
+        for i in range(req.n - 1, -1, -1):
+            h = _bh(req.sys_full, req.product, req.session, i)
             if h in self.cache:
-                self.cache.move_to_end(h)
-            else:
-                self.cache[h] = None
+                del self.cache[h]
+            self.cache[h] = None
         while len(self.cache) > self.capacity:
-            self.cache.popitem(last=False)
+            self.cache.pop(next(iter(self.cache)))
 
     def backlog(self, t: float) -> float:
         return max(0.0, self.free_at - t)
@@ -128,18 +187,26 @@ def prefill_seconds(tokens: int, args) -> float:
     return args.overhead + tokens / args.prefill_tps
 
 
+def _least_loaded(t: float, reps: list[Replica]) -> int:
+    best = 0
+    for r in range(1, len(reps)):
+        if reps[r].backlog(t) < reps[best].backlog(t):
+            best = r
+    return best
+
+
 # --------------------------------------------------------------------------- routers
 
 class Ring:
     """Consistent-hash ring with virtual nodes."""
 
     def __init__(self, n: int, vnodes: int = 100):
-        pts = sorted((stable_hash("node", r, v), r) for r in range(n) for v in range(vnodes))
+        pts = sorted((_h32(r * 131 + 7, v * 977 + 3), r) for r in range(n) for v in range(vnodes))
         self.keys = [k for k, _ in pts]
         self.owners = [r for _, r in pts]
 
-    def get(self, key) -> int:
-        i = bisect.bisect(self.keys, stable_hash("key", key)) % len(self.keys)
+    def get(self, key: int) -> int:
+        i = bisect.bisect(self.keys, _h32(key, 0x51ED)) % len(self.keys)
         return self.owners[i]
 
 
@@ -161,7 +228,7 @@ class LeastLoaded:
         pass
 
     def route(self, req, t, reps):
-        return min(range(len(reps)), key=lambda r: reps[r].backlog(t))
+        return _least_loaded(t, reps)
 
 
 class Sticky:
@@ -171,7 +238,7 @@ class Sticky:
         self.ring = Ring(n)
 
     def route(self, req, t, reps):
-        return self.ring.get(("session", req.session))
+        return self.ring.get(req.session)
 
 
 class PrefixHash:
@@ -181,7 +248,7 @@ class PrefixHash:
         self.ring = Ring(n)
 
     def route(self, req, t, reps):
-        key = req.hashes[0] if req.hashes else ("product", req.product)
+        key = _bh(req.sys_full, req.product, req.session, 0)
         return self.ring.get(key)
 
 
@@ -197,18 +264,23 @@ class ApproxTree:
     def route(self, req, t, reps):
         n = len(reps)
         alive, best_len = set(range(n)), {r: 0 for r in range(n)}
-        for depth, h in enumerate(req.hashes, start=1):
+        for depth in range(1, req.n + 1):
+            h = _bh(req.sys_full, req.product, req.session, depth - 1)
             alive &= self.sent.get(h, set())
             if not alive:
                 break
             for r in alive:
                 best_len[r] = depth
-        least = min(range(n), key=lambda r: reps[r].backlog(t))
-        best = max(range(n), key=lambda r: (best_len[r], -reps[r].backlog(t)))
-        ratio = best_len[best] / max(1, len(req.hashes))
+        least = _least_loaded(t, reps)
+        best = 0
+        for r in range(1, n):
+            if best_len[r] > best_len[best] or (best_len[r] == best_len[best] and reps[r].backlog(t) < reps[best].backlog(t)):
+                best = r
+        ratio = best_len[best] / max(1, req.n)
         overloaded = reps[best].backlog(t) > reps[least].backlog(t) + self.slack
         choice = best if ratio >= self.threshold and not overloaded else least
-        for h in req.hashes:
+        for i in range(req.n):
+            h = _bh(req.sys_full, req.product, req.session, i)
             self.sent.setdefault(h, set()).add(choice)
         return choice
 
@@ -218,13 +290,17 @@ class KVAware:
     name = "kv-aware-cost"
 
     def __init__(self, n, args):
-        self.load_weight = args.kv_load_weight
+        pass
 
     def route(self, req, t, reps):
-        def cost(r):
-            uncached = req.tokens - reps[r].match(req.hashes) * BLOCK
-            return prefill_seconds(uncached, self.args) + self.load_weight * reps[r].backlog(t)
-        return min(range(len(reps)), key=cost)
+        args = self.args
+        best, best_cost = 0, float("inf")
+        for r in range(len(reps)):
+            uncached = req.tokens - reps[r].match(req) * BLOCK
+            cost = prefill_seconds(uncached, args) + reps[r].backlog(t)
+            if cost < best_cost:
+                best_cost, best = cost, r
+        return best
 
 
 STRATEGIES = [RoundRobin, LeastLoaded, Sticky, PrefixHash, ApproxTree, KVAware]
@@ -244,12 +320,12 @@ def simulate(strategy_cls, requests: list[Request], args) -> dict:
     ttfts, cached_total, prompt_total = [], 0, 0
     for req in requests:
         r = reps[router.route(req, req.t, reps)]
-        cached = r.match(req.hashes) * BLOCK
+        cached = r.match(req) * BLOCK
         work = prefill_seconds(req.tokens - cached, args)
         start = max(req.t, r.free_at)
         r.free_at = start + work
         r.busy_time += work
-        r.admit(req.hashes)
+        r.admit(req)
         ttfts.append(r.free_at - req.t)
         cached_total += cached
         prompt_total += req.tokens
@@ -282,7 +358,6 @@ def main():
     ap.add_argument("--overhead", type=float, default=0.02, help="fixed seconds per request")
     ap.add_argument("--match-threshold", type=float, default=0.5, help="approx tree: min prefix match ratio")
     ap.add_argument("--balance-slack", type=float, default=1.0, help="approx tree: max extra backlog (s)")
-    ap.add_argument("--kv-load-weight", type=float, default=1.0, help="kv-aware: weight on queue backlog")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--csv", help="write results to this CSV file")
     args = ap.parse_args()
@@ -290,7 +365,7 @@ def main():
     rows = []
     for rate in [float(x) for x in args.rates.split(",")]:
         args.rate = rate
-        requests = generate_workload(args, random.Random(args.seed))
+        requests = generate_workload(args)
         print(f"\nrate {rate:g} req/s · {len(requests)} requests · {args.replicas} replicas · "
               f"{args.cache_tokens:,} cache tokens each")
         print(f"{'strategy':<20}{'hit rate':>9}{'TTFT p50':>10}{'TTFT p99':>10}{'imbalance':>11}{'util':>7}")

@@ -1,0 +1,17 @@
+{
+  "seed": 7,
+  "rates": [6, 20],
+  "duration": 900,
+  "products": 6,
+  "zipf": 1.2,
+  "sysMin": 1000,
+  "sysMax": 6000,
+  "maxTurns": 9,
+  "think": 20,
+  "tps": 8000,
+  "overhead": 0.02,
+  "thresh": 0.5,
+  "slack": 1.0,
+  "replicas": 4,
+  "cacheTokens": 60000
+}
