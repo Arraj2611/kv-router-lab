@@ -1,0 +1,639 @@
+<title>KV Router Lab</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,500..800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: an instrument panel. Monochrome slate chrome; color is reserved for data (one hue per system prompt). */
+:root {
+  --page: #eef1f4;
+  --surface: #fbfcfd;
+  --ink: #10161f;
+  --ink-2: #4a5563;
+  --muted: #7c8794;
+  --grid: #dde2e8;
+  --line: #c2cad3;
+  --track: #e6eaee;
+  --session: #8e99a6;
+  --serious: #c2410c;
+  --ring: rgba(16,22,31,.10);
+  --p0: #2a78d6; --p1: #eb6834; --p2: #1baf7a; --p3: #eda100; --p4: #e87ba4; --p5: #008300;
+  --font-display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #0c1117; --surface: #141a22; --ink: #e9edf2; --ink-2: #a9b3bf; --muted: #7c8794;
+    --grid: #232b35; --line: #36404c; --track: #1e252e; --session: #5e6976; --serious: #ec835a;
+    --ring: rgba(255,255,255,.10);
+    --p0: #3987e5; --p1: #d95926; --p2: #199e70; --p3: #c98500; --p4: #d55181; --p5: #008300;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page: #0c1117; --surface: #141a22; --ink: #e9edf2; --ink-2: #a9b3bf; --muted: #7c8794;
+  --grid: #232b35; --line: #36404c; --track: #1e252e; --session: #5e6976; --serious: #ec835a;
+  --ring: rgba(255,255,255,.10);
+  --p0: #3987e5; --p1: #d95926; --p2: #199e70; --p3: #c98500; --p4: #d55181; --p5: #008300;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--page); color: var(--ink);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 56px;
+}
+.wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 22px; }
+h1, h2 { font-family: var(--font-display); font-stretch: 82%; letter-spacing: -0.01em; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2rem, 5.2vw, 3.1rem); font-weight: 800; line-height: 1; }
+h2 { font-size: 1.35rem; font-weight: 700; line-height: 1.15; }
+p { margin: 0; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); }
+.lede { max-width: 64ch; color: var(--ink-2); }
+header { display: grid; gap: 10px; }
+
+.panel { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 18px; min-width: 0; }
+
+/* controls */
+.controls { display: grid; gap: 16px; }
+.ctl-row { display: flex; flex-wrap: wrap; gap: 14px 26px; align-items: end; }
+.ctl { display: grid; gap: 6px; min-width: 0; }
+.ctl-label { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button, .btn {
+  font: 500 13.5px/1 var(--font-body); color: var(--ink); background: transparent;
+  border: 1px solid var(--line); border-radius: 6px; padding: 8px 11px; cursor: pointer;
+}
+.seg button:hover, .btn:hover { border-color: var(--ink-2); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.btn.primary { background: var(--ink); color: var(--surface); border-color: var(--ink); min-width: 84px; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.range { display: flex; align-items: center; gap: 10px; }
+.range input { width: 150px; accent-color: var(--ink); }
+.range output { font-family: var(--font-mono); font-size: 13.5px; font-variant-numeric: tabular-nums; min-width: 8ch; }
+.strat-desc { color: var(--ink-2); font-size: 14px; max-width: 72ch; }
+.strat-desc b { color: var(--ink); font-weight: 600; }
+
+/* stage */
+.stage-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px 16px; margin-bottom: 10px; }
+.clock { font-family: var(--font-mono); font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+#stage { display: block; width: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 12px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+/* metrics */
+.metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 1px; background: var(--ring); border-radius: 10px; overflow: hidden; border: 1px solid var(--ring); }
+.metric { background: var(--surface); padding: 14px 16px; display: grid; gap: 2px; }
+.metric .v { font-family: var(--font-display); font-stretch: 85%; font-size: 1.9rem; font-weight: 700; line-height: 1.1; }
+.metric .k { font-size: 13px; color: var(--ink-2); }
+.metric .s { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
+@media (max-width: 640px) { .metrics { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+
+.chart-wrap { position: relative; }
+#trace { display: block; width: 100%; height: 230px; }
+.chart-legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); margin: 8px 0 6px; }
+.chart-legend i { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--ink); vertical-align: middle; margin-right: 6px; }
+.chart-legend i.dash { border-top: 2px dashed var(--ink-2); }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--surface); font-family: var(--font-mono); font-size: 12px; line-height: 1.45; padding: 7px 9px; border-radius: 6px; white-space: nowrap; z-index: 2; }
+
+/* comparison */
+.cmp-head { display: grid; gap: 6px; margin-bottom: 14px; }
+.cmp-sub { color: var(--ink-2); font-size: 14px; max-width: 72ch; }
+.verdict { font-size: 15.5px; max-width: 72ch; }
+.cmp-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 26px; }
+@media (max-width: 760px) { .cmp-grid { grid-template-columns: 1fr; } }
+.bars { display: grid; gap: 7px; }
+.bars h3 { margin: 0 0 4px; font: 600 14px/1.3 var(--font-body); }
+.bars .scale-note { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); margin-bottom: 4px; }
+.bar-row { display: grid; grid-template-columns: 8.6rem minmax(0,1fr) 4.6rem; align-items: center; gap: 10px; font-size: 13.5px; cursor: default; }
+.bar-row .name { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar-row.cur .name { color: var(--ink); font-weight: 600; }
+.bar-track { height: 16px; position: relative; border-left: 1px solid var(--line); }
+.bar-fill { position: absolute; left: 0; top: 2px; bottom: 2px; background: var(--line); border-radius: 0 4px 4px 0; min-width: 2px; transition: width .4s ease; }
+.bar-row.cur .bar-fill { background: var(--ink); }
+.bar-row .val { font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; }
+.progress { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-2); }
+details { margin-top: 18px; }
+summary { cursor: pointer; font-size: 14px; color: var(--ink-2); }
+.tbl-wrap { overflow-x: auto; margin-top: 10px; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
+.notes { color: var(--ink-2); font-size: 13.5px; max-width: 76ch; display: grid; gap: 8px; }
+.notes b { color: var(--ink); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .bar-fill { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">LLM serving · prefix-cache routing</div>
+    <h1>KV Router Lab</h1>
+    <p class="lede">A fleet of GPU replicas serves six products, each with its own system prompt, plus multi-turn chats that grow every turn. Each replica keeps a KV cache with LRU eviction. Pick a router and watch where requests land, what each cache holds, and what that does to time to first token.</p>
+  </header>
+
+  <section class="panel controls" aria-label="Simulation controls">
+    <div class="ctl">
+      <span class="ctl-label" id="strat-label">Routing strategy</span>
+      <div class="seg" id="strats" role="group" aria-labelledby="strat-label"></div>
+    </div>
+    <p class="strat-desc" id="strat-desc"></p>
+    <div class="ctl-row">
+      <label class="ctl" for="rate"><span class="ctl-label">Traffic</span>
+        <span class="range"><input type="range" id="rate" min="2" max="24" step="1" value="18"><output id="rate-out"></output></span></label>
+      <label class="ctl" for="reps"><span class="ctl-label">Replicas</span>
+        <span class="range"><input type="range" id="reps" min="2" max="8" step="1" value="4"><output id="reps-out"></output></span></label>
+      <label class="ctl" for="cache"><span class="ctl-label">KV cache per replica</span>
+        <span class="range"><input type="range" id="cache" min="20000" max="140000" step="10000" value="60000"><output id="cache-out"></output></span></label>
+      <div class="ctl"><span class="ctl-label" id="speed-label">Speed</span>
+        <div class="seg" id="speed" role="group" aria-labelledby="speed-label"></div></div>
+      <div class="ctl"><span class="ctl-label">&nbsp;</span>
+        <div class="seg"><button class="btn primary" id="play" type="button">Pause</button><button class="btn" id="reset" type="button">Restart</button></div></div>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="Live fleet">
+    <div class="stage-head">
+      <h2>The fleet, live</h2>
+      <span class="clock" id="clock">0:00 simulated</span>
+    </div>
+    <canvas id="stage" role="img" aria-label="Router sending requests to replicas; each replica shows its queue and KV cache contents"></canvas>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="metrics" aria-label="Live metrics">
+    <div class="metric"><span class="k">Prompt tokens served from cache</span><span class="v" id="m-hit">–</span><span class="s">since start</span></div>
+    <div class="metric"><span class="k">Median time to first token</span><span class="v" id="m-p50">–</span><span class="s">last 500 requests</span></div>
+    <div class="metric"><span class="k">Slowest 1% (p99 TTFT)</span><span class="v" id="m-p99">–</span><span class="s">last 500 requests</span></div>
+    <div class="metric"><span class="k">Load imbalance</span><span class="v" id="m-imb">–</span><span class="s">busiest replica ÷ average</span></div>
+  </section>
+
+  <section class="panel" aria-label="Time to first token over time">
+    <h2>Time to first token, as the run unfolds</h2>
+    <div class="chart-legend"><span><i></i>Slowest 1% (p99)</span><span><i class="dash"></i>Median (p50)</span><span style="color:var(--muted)">rolling, last 300 requests · log scale</span></div>
+    <div class="chart-wrap" id="trace-wrap"><canvas id="trace"></canvas><div class="tip" id="trace-tip" hidden></div></div>
+  </section>
+
+  <section class="panel" aria-label="All strategies compared">
+    <div class="cmp-head">
+      <h2>All six strategies, same traffic</h2>
+      <p class="verdict" id="verdict">Running the comparison…</p>
+      <p class="cmp-sub" id="cmp-sub"></p>
+    </div>
+    <div class="cmp-grid">
+      <div class="bars" id="bars-p99"><h3>Slowest 1% of first tokens (p99)</h3><div class="scale-note">log scale · shorter is better</div></div>
+      <div class="bars" id="bars-hit"><h3>Prompt tokens served from cache</h3><div class="scale-note">0–100% · longer is better</div></div>
+    </div>
+    <p class="progress" id="progress" hidden></p>
+    <details>
+      <summary>Show all numbers as a table</summary>
+      <div class="tbl-wrap"><table id="tbl"><thead><tr><th>Strategy</th><th>Cache hits</th><th>TTFT p50</th><th>TTFT p99</th><th>Imbalance</th><th>Utilization</th></tr></thead><tbody></tbody></table></div>
+    </details>
+  </section>
+
+  <section class="notes" aria-label="Model notes">
+    <p><b>How the model works.</b> Prompts are split into 16-token blocks. A block counts as cached only if every block before it is cached too, the way vLLM's chained block hashes work. Each replica runs prefill one request at a time and evicts least-recently-used blocks, oldest leaves first. Time to first token is queueing delay plus prefill of the uncached part; decoding is not modelled.</p>
+    <p><b>What it leaves out.</b> No batching, so queues grow faster than on a real engine near saturation: trust the ranking of strategies more than the absolute seconds. No cache offload tier, no replica failures, and the approximate router never forgets what it routed.</p>
+  </section>
+</div>
+
+<script type="text/plain" id="engine-src">
+const BLOCK = 16, SESS_BASE = 1e9;
+function rng(seed) { let a = seed >>> 0; return function () { a = (a + 0x6D2B79F5) >>> 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function h32(a, b) { let x = Math.imul((a | 0) ^ 0x9e3779b9, 0x85ebca6b) ^ (b | 0); x ^= x >>> 13; x = Math.imul(x, 0xc2b2ae35); x ^= x >>> 16; return x >>> 0; }
+function expo(r, rate) { return -Math.log(1 - r()) / rate; }
+function randint(r, a, b) { return a + Math.floor(r() * (b - a + 1)); }
+
+function makeWorkload(c) {
+  const r = rng(c.seed), P = c.products;
+  const sysLen = []; for (let p = 0; p < P; p++) sysLen.push(randint(r, c.sysMin, c.sysMax));
+  const w = []; let ws = 0; for (let k = 0; k < P; k++) { const v = 1 / Math.pow(k + 1, c.zipf); w.push(v); ws += v; }
+  const pick = () => { let x = r() * ws; for (let k = 0; k < P; k++) { x -= w[k]; if (x <= 0) return k; } return P - 1; };
+  const sessRate = c.rate / ((1 + c.maxTurns) / 2);
+  const reqs = []; let t = 0, sid = 0;
+  while (true) {
+    t += expo(r, sessRate); if (t > c.duration) break;
+    const p = pick(); let hist = sysLen[p], tt = t; const turns = randint(r, 1, c.maxTurns);
+    for (let k = 0; k < turns; k++) {
+      const tok = hist + randint(r, 30, 300);
+      if (tt <= c.duration) reqs.push({ t: tt, sid, p, tokens: tok, sysFull: Math.floor(sysLen[p] / BLOCK), n: Math.floor(tok / BLOCK) });
+      hist = tok + randint(r, 100, 500); tt += expo(r, 1 / c.think);
+    }
+    sid++;
+  }
+  reqs.sort((a, b) => a.t - b.t);
+  return { reqs, sysLen, weights: w.map(v => v / ws) };
+}
+// System-prompt blocks are shared by every session of a product; later blocks belong to one session.
+function bh(q, i) { return i < q.sysFull ? q.p * 100000 + i + 1 : SESS_BASE + q.sid * 10000 + i; }
+
+class Replica {
+  constructor(cap, P) { this.cache = new Map(); this.cap = cap; this.P = P; this.freeAt = 0; this.busy = 0; this.cat = new Array(P + 1).fill(0); this.hitTok = 0; this.promptTok = 0; this.served = 0; }
+  catOf(h) { return h < SESS_BASE ? Math.floor((h - 1) / 100000) : this.P; }
+  match(q) { let n = 0; const c = this.cache; for (let i = 0; i < q.n; i++) { if (!c.has(bh(q, i))) break; n++; } return n; }
+  admit(q) {
+    const c = this.cache;
+    for (let i = q.n - 1; i >= 0; i--) { const h = bh(q, i); if (c.has(h)) c.delete(h); else this.cat[this.catOf(h)]++; c.set(h, 1); }
+    while (c.size > this.cap) { const h = c.keys().next().value; c.delete(h); this.cat[this.catOf(h)]--; }
+  }
+  backlog(t) { return Math.max(0, this.freeAt - t); }
+}
+
+const STRATS = [
+  { id: "rr", name: "Round-robin", desc: "<b>Round-robin</b> sends each request to the next replica in turn. Load stays even, but a chat's next turn usually lands on a replica that has never seen it." },
+  { id: "least", name: "Least-loaded", desc: "<b>Least-loaded</b> picks the replica with the shortest queue. Good balance, no awareness of what each cache holds." },
+  { id: "sticky", name: "Sticky session", desc: "<b>Sticky session</b> hashes the user's session onto a consistent-hash ring, so every turn of a chat hits the same warm cache. It cannot steer around a busy replica." },
+  { id: "prefix", name: "Prefix hash", desc: "<b>Prefix hash</b> hashes the start of the prompt, so each system prompt lives on one replica. Memory-efficient, until the most popular prompt overloads its replica." },
+  { id: "approx", name: "Approx. prefix tree", desc: "<b>Approximate prefix tree</b> remembers which replica it sent each prefix to and follows the longest match, unless that replica is much busier. It never sees evictions, so it can chase a prefix that is gone." },
+  { id: "kv", name: "KV-aware cost", desc: "<b>KV-aware cost</b> reads each replica's real cache and picks the lowest estimated wait: prefill time for the uncached tokens plus the queue ahead." },
+];
+
+function ring(n) {
+  const pts = []; for (let r = 0; r < n; r++) for (let v = 0; v < 100; v++) pts.push([h32(r * 131 + 7, v * 977 + 3), r]);
+  pts.sort((a, b) => a[0] - b[0]); const keys = pts.map(x => x[0]), own = pts.map(x => x[1]);
+  return k => { const x = h32(k, 0x51ed); let lo = 0, hi = keys.length; while (lo < hi) { const m = (lo + hi) >> 1; if (keys[m] <= x) lo = m + 1; else hi = m; } return own[lo % keys.length]; };
+}
+
+function makeRouter(id, n, c) {
+  const least = (t, R) => { let b = 0; for (let r = 1; r < n; r++) if (R[r].backlog(t) < R[b].backlog(t)) b = r; return b; };
+  if (id === "rr") { let i = 0; return () => (i = (i + 1) % n); }
+  if (id === "least") return (q, t, R) => least(t, R);
+  if (id === "sticky") { const g = ring(n); return q => g(q.sid); }
+  if (id === "prefix") { const g = ring(n); return q => g(bh(q, 0)); }
+  if (id === "approx") {
+    const sent = new Map(), all = (1 << n) - 1;
+    return (q, t, R) => {
+      const L = new Array(n).fill(0); let alive = all;
+      for (let i = 0; i < q.n; i++) { alive &= (sent.get(bh(q, i)) || 0); if (!alive) break; for (let r = 0; r < n; r++) if ((alive >> r) & 1) L[r] = i + 1; }
+      const lst = least(t, R); let best = 0;
+      for (let r = 1; r < n; r++) if (L[r] > L[best] || (L[r] === L[best] && R[r].backlog(t) < R[best].backlog(t))) best = r;
+      const ok = L[best] / Math.max(1, q.n) >= c.thresh && R[best].backlog(t) <= R[lst].backlog(t) + c.slack;
+      const ch = ok ? best : lst, bit = 1 << ch;
+      for (let i = 0; i < q.n; i++) { const h = bh(q, i); sent.set(h, (sent.get(h) || 0) | bit); }
+      return ch;
+    };
+  }
+  return (q, t, R) => {
+    let best = 0, bc = Infinity;
+    for (let r = 0; r < n; r++) { const cost = c.overhead + (q.tokens - R[r].match(q) * BLOCK) / c.tps + R[r].backlog(t); if (cost < bc) { bc = cost; best = r; } }
+    return best;
+  };
+}
+
+class Fleet {
+  constructor(c, id) {
+    this.c = c; this.R = []; for (let i = 0; i < c.replicas; i++) this.R.push(new Replica(Math.floor(c.cacheTokens / BLOCK), c.products));
+    this.route = makeRouter(id, c.replicas, c); this.ttft = []; this.hitTok = 0; this.promptTok = 0;
+  }
+  serve(q) {
+    const ri = this.route(q, q.t, this.R), r = this.R[ri];
+    const cached = r.match(q) * BLOCK, work = this.c.overhead + (q.tokens - cached) / this.c.tps;
+    const start = Math.max(q.t, r.freeAt); r.freeAt = start + work; r.busy += work; r.admit(q);
+    const tt = r.freeAt - q.t; this.ttft.push(tt);
+    this.hitTok += cached; this.promptTok += q.tokens; r.hitTok += cached; r.promptTok += q.tokens; r.served++;
+    return { ri, cached, tt };
+  }
+  summary(elapsed) {
+    const s = this.ttft.slice().sort((a, b) => a - b), pct = x => s.length ? s[Math.min(s.length - 1, Math.floor(x * s.length))] : 0;
+    const busy = this.R.map(r => r.busy), mean = busy.reduce((a, b) => a + b, 0) / busy.length;
+    return { hit: this.promptTok ? this.hitTok / this.promptTok : 0, p50: pct(.5), p99: pct(.99), imb: mean ? Math.max(...busy) / mean : 0, util: mean / elapsed };
+  }
+}
+</script>
+
+<script>
+(() => {
+  const SRC = document.getElementById("engine-src").textContent;
+  const E = new Function(SRC + "\nreturn { makeWorkload, Fleet, STRATS, BLOCK };")();
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const cfg = { seed: 7, products: 6, zipf: 1.2, sysMin: 1000, sysMax: 6000, maxTurns: 9, think: 20,
+    tps: 8000, overhead: 0.02, thresh: 0.5, slack: 1.0, duration: 600, rate: 18, replicas: 4, cacheTokens: 60000 };
+  const SPEEDS = [{ v: 2, l: "2×" }, { v: 6, l: "6×" }, { v: 20, l: "20×" }];
+  let strategy = "kv", speed = 6;
+  const $ = id => document.getElementById(id);
+  const LETTERS = "ABCDEF";
+
+  // ---------- formatting
+  const fmtS = v => v >= 120 ? (v / 60).toFixed(1) + " min" : v >= 10 ? Math.round(v) + " s" : v >= 1 ? v.toFixed(1) + " s" : v.toFixed(2) + " s";
+  const fmtPct = v => (v * 100).toFixed(1) + "%";
+  const fmtClock = t => Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0");
+
+  // ---------- theme tokens for canvas
+  let T = {};
+  function readTokens() {
+    const cs = getComputedStyle(document.documentElement), g = n => cs.getPropertyValue(n).trim();
+    T = { surface: g("--surface"), ink: g("--ink"), ink2: g("--ink-2"), muted: g("--muted"), grid: g("--grid"), line: g("--line"), track: g("--track"),
+      session: g("--session"), serious: g("--serious"), p: [0, 1, 2, 3, 4, 5].map(i => g("--p" + i)),
+      body: getComputedStyle(document.body).fontFamily, mono: g("--font-mono") };
+  }
+  readTokens();
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readTokens(); drawTrace(); });
+  new MutationObserver(() => { readTokens(); drawTrace(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+  // ---------- controls
+  const stratBox = $("strats");
+  E.STRATS.forEach(s => {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = s.name; b.dataset.id = s.id; b.id = "strat-" + s.id;
+    b.addEventListener("click", () => { strategy = s.id; syncStrat(); resetLive(); markCurrent(); });
+    stratBox.appendChild(b);
+  });
+  function syncStrat() {
+    stratBox.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.id === strategy)));
+    $("strat-desc").innerHTML = E.STRATS.find(s => s.id === strategy).desc;
+  }
+  const speedBox = $("speed");
+  SPEEDS.forEach(s => {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = s.l; b.id = "speed-" + s.v;
+    b.addEventListener("click", () => { speed = s.v; syncSpeed(); });
+    speedBox.appendChild(b);
+  });
+  function syncSpeed() { speedBox.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.id === "speed-" + speed))); }
+
+  function syncOutputs() {
+    $("rate-out").textContent = cfg.rate + " req/s";
+    $("reps-out").textContent = cfg.replicas + " GPUs";
+    $("cache-out").textContent = Math.round(cfg.cacheTokens / 1000) + "k tokens";
+  }
+  let debounce;
+  [["rate", "rate"], ["reps", "replicas"], ["cache", "cacheTokens"]].forEach(([id, key]) => {
+    $(id).addEventListener("input", e => {
+      cfg[key] = +e.target.value; syncOutputs();
+      clearTimeout(debounce); debounce = setTimeout(() => { newWorkload(); resetLive(); runComparison(); }, 350);
+    });
+  });
+  $("play").addEventListener("click", () => {
+    if (done) { resetLive(); playing = true; } else playing = !playing;
+    syncPlay();
+  });
+  $("reset").addEventListener("click", () => { resetLive(); playing = true; syncPlay(); });
+  function syncPlay() { $("play").textContent = playing ? "Pause" : done ? "Replay" : "Play"; }
+
+  // ---------- live simulation state
+  let W, fleet, idx, simT, recent, trace, nextSample, dots, flashes, playing = !reduceMotion, done = false;
+  function newWorkload() { W = E.makeWorkload(cfg); buildLegend(); }
+  function resetLive() {
+    fleet = new E.Fleet(cfg, strategy); idx = 0; simT = 0; recent = []; trace = []; nextSample = 2; dots = []; flashes = new Array(cfg.replicas).fill(0); done = false;
+    layoutStage(); updateMetrics(); drawTrace(); syncPlay();
+  }
+  function rollingPct(arr, q) { if (!arr.length) return 0; const s = arr.slice().sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; }
+
+  function advance(dt, animate) {
+    simT = Math.min(cfg.duration, simT + dt);
+    const now = performance.now();
+    while (idx < W.reqs.length && W.reqs[idx].t <= simT) {
+      const q = W.reqs[idx++], res = fleet.serve(q);
+      recent.push(res.tt); if (recent.length > 500) recent.shift();
+      if (animate && dots.length < 260) dots.push({ ri: res.ri, p: q.p, t0: now, hitShare: q.tokens ? res.cached / q.tokens : 0 });
+      flashes[res.ri] = now;
+    }
+    while (simT >= nextSample) {
+      const last = recent.slice(-300);
+      trace.push({ t: nextSample, p50: rollingPct(last, .5), p99: rollingPct(last, .99) });
+      nextSample += 2;
+    }
+    if (simT >= cfg.duration) { done = true; playing = false; syncPlay(); }
+  }
+
+  function updateMetrics() {
+    const hit = fleet.promptTok ? fleet.hitTok / fleet.promptTok : 0;
+    const busy = fleet.R.map(r => r.busy), mean = busy.reduce((a, b) => a + b, 0) / busy.length;
+    $("m-hit").textContent = fleet.promptTok ? fmtPct(hit) : "–";
+    $("m-p50").textContent = recent.length ? fmtS(rollingPct(recent, .5)) : "–";
+    $("m-p99").textContent = recent.length ? fmtS(rollingPct(recent, .99)) : "–";
+    $("m-imb").textContent = mean > 0 ? (Math.max(...busy) / mean).toFixed(2) + "×" : "–";
+    $("clock").textContent = fmtClock(simT) + " of " + fmtClock(cfg.duration) + " simulated · " + idx.toLocaleString() + " requests";
+  }
+
+  function buildLegend() {
+    const L = $("legend"); L.innerHTML = "";
+    W.sysLen.forEach((len, i) => {
+      const s = document.createElement("span");
+      s.innerHTML = `<i class="sw" style="background:var(--p${i})"></i>Prompt ${LETTERS[i]} · ${len.toLocaleString()} tok · ${Math.round(W.weights[i] * 100)}% of chats`;
+      L.appendChild(s);
+    });
+    const s = document.createElement("span"); s.innerHTML = `<i class="sw" style="background:var(--session)"></i>Chat history (one user's)`; L.appendChild(s);
+  }
+
+  // ---------- stage canvas
+  const stage = $("stage"), sctx = stage.getContext("2d");
+  let SW = 0, SH = 0, panels = [], router = { x: 0, y: 0 };
+  function layoutStage() {
+    const w = stage.parentElement.clientWidth - 36 || 600;
+    const n = cfg.replicas, cols = Math.max(1, Math.min(n, Math.floor((w + 12) / 132))), rows = Math.ceil(n / cols);
+    const gap = 12, pw = (w - gap * (cols - 1)) / cols, ph = 132, top = 92;
+    SW = w; SH = top + rows * ph + (rows - 1) * gap + 4;
+    const dpr = window.devicePixelRatio || 1;
+    stage.width = Math.round(SW * dpr); stage.height = Math.round(SH * dpr); stage.style.height = SH + "px";
+    sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    router = { x: SW / 2, y: 26 };
+    panels = [];
+    for (let i = 0; i < n; i++) {
+      const r = Math.floor(i / cols), c = i % cols, inRow = Math.min(cols, n - r * cols);
+      const offset = (w - (inRow * pw + (inRow - 1) * gap)) / 2;
+      panels.push({ x: offset + c * (pw + gap), y: top + r * (ph + gap), w: pw, h: ph });
+    }
+  }
+  new ResizeObserver(() => { layoutStage(); drawTrace(); }).observe(stage.parentElement);
+
+  function rr(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, r) : ctx.rect(x, y, w, h); }
+  function bez(p, t) {
+    const x0 = router.x, y0 = router.y + 16, x1 = p.x + p.w / 2, y1 = p.y, cy = (y0 + y1) / 2, u = 1 - t;
+    return { x: u * u * u * x0 + 3 * u * u * t * x0 + 3 * u * t * t * x1 + t * t * t * x1, y: u * u * u * y0 + 3 * u * u * t * cy + 3 * u * t * t * cy + t * t * t * y1 };
+  }
+
+  function drawStage(now) {
+    const c = sctx; c.clearRect(0, 0, SW, SH);
+    // wires
+    c.lineWidth = 1; c.strokeStyle = T.grid;
+    panels.forEach(p => { c.beginPath(); const x0 = router.x, y0 = router.y + 16, x1 = p.x + p.w / 2, y1 = p.y, cy = (y0 + y1) / 2; c.moveTo(x0, y0); c.bezierCurveTo(x0, cy, x1, cy, x1, y1); c.stroke(); });
+    // router
+    const label = "Router · " + E.STRATS.find(s => s.id === strategy).name;
+    c.font = `600 13px ${T.body}`; const tw = c.measureText(label).width + 28;
+    rr(c, router.x - tw / 2, router.y - 16, tw, 32, 16); c.fillStyle = T.ink; c.fill();
+    c.fillStyle = T.surface; c.textAlign = "center"; c.textBaseline = "middle"; c.fillText(label, router.x, router.y + 1);
+    // panels
+    const t = simT;
+    panels.forEach((p, i) => {
+      const R = fleet.R[i]; if (!R) return;
+      const flash = Math.max(0, 1 - (now - flashes[i]) / 350);
+      rr(c, p.x + .5, p.y + .5, p.w - 1, p.h - 1, 8); c.fillStyle = T.surface; c.fill();
+      c.lineWidth = 1 + flash; c.strokeStyle = flash > 0 ? T.ink2 : T.line; c.stroke();
+      const px = p.x + 12, pw = p.w - 24; let y = p.y + 20;
+      c.textAlign = "left"; c.textBaseline = "alphabetic";
+      c.fillStyle = T.ink; c.font = `700 14px ${T.body}`; c.fillText("GPU " + (i + 1), px, y);
+      c.textAlign = "right"; c.fillStyle = T.muted; c.font = `400 11.5px ${T.mono}`;
+      c.fillText(R.served.toLocaleString() + " req", px + pw, y);
+      // queue
+      const bl = R.backlog(t), over = bl > 3;
+      y += 22; c.textAlign = "left"; c.fillStyle = T.ink2; c.font = `400 12px ${T.body}`; c.fillText("Queue", px, y);
+      c.textAlign = "right"; c.fillStyle = over ? T.serious : T.ink; c.font = `500 12px ${T.mono}`;
+      c.fillText((over ? "▲ " : "") + fmtS(bl), px + pw, y);
+      y += 6; const qScale = Math.max(4, ...fleet.R.map(r => r.backlog(t)));
+      rr(c, px, y, pw, 6, 3); c.fillStyle = T.track; c.fill();
+      if (bl > 0) { rr(c, px, y, Math.max(3, pw * bl / qScale), 6, 3); c.fillStyle = over ? T.serious : T.ink; c.fill(); }
+      // cache
+      y += 26; const full = R.cache.size / R.cap;
+      c.textAlign = "left"; c.fillStyle = T.ink2; c.font = `400 12px ${T.body}`; c.fillText("KV cache", px, y);
+      c.textAlign = "right"; c.fillStyle = T.ink; c.font = `500 12px ${T.mono}`; c.fillText(Math.round(full * 100) + "% full", px + pw, y);
+      y += 6; rr(c, px, y, pw, 14, 3); c.fillStyle = T.track; c.fill();
+      let x = px;
+      for (let k = 0; k <= cfg.products; k++) {
+        const n = R.cat[k]; if (!n) continue; const segW = pw * n / R.cap; if (segW < .5) continue;
+        c.fillStyle = k === cfg.products ? T.session : T.p[k];
+        rr(c, x, y, Math.max(1, segW - 2), 14, 2); c.fill(); x += segW;
+      }
+      // hit rate
+      y += 32; c.textAlign = "left"; c.fillStyle = T.ink2; c.font = `400 12px ${T.body}`; c.fillText("Cache hits", px, y);
+      c.textAlign = "right"; c.fillStyle = T.ink; c.font = `500 12px ${T.mono}`;
+      c.fillText(R.promptTok ? fmtPct(R.hitTok / R.promptTok) : "–", px + pw, y);
+    });
+    // dots
+    const life = 600;
+    dots = dots.filter(d => now - d.t0 < life);
+    dots.forEach(d => {
+      const p = panels[d.ri]; if (!p) return; const k = (now - d.t0) / life, e = 1 - Math.pow(1 - k, 3), pos = bez(p, e);
+      c.beginPath(); c.arc(pos.x, pos.y, 5, 0, Math.PI * 2); c.fillStyle = T.surface; c.fill();
+      c.beginPath(); c.arc(pos.x, pos.y, 3.6, 0, Math.PI * 2); c.fillStyle = T.p[d.p]; c.fill();
+    });
+  }
+
+  // ---------- trace chart
+  const trc = $("trace"), tctx = trc.getContext("2d"), tip = $("trace-tip");
+  const TM = { l: 46, r: 14, t: 10, b: 26 };
+  let hoverX = null;
+  function traceScale() {
+    const w = trc.clientWidth, h = trc.clientHeight;
+    const maxV = Math.max(1, ...trace.map(d => d.p99));
+    const lo = 0.05, hi = Math.pow(10, Math.ceil(Math.log10(maxV * 1.05)));
+    const x = t => TM.l + (w - TM.l - TM.r) * t / cfg.duration;
+    const y = v => { const lv = Math.log10(Math.max(lo, v)); return TM.t + (h - TM.t - TM.b) * (1 - (lv - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))); };
+    return { w, h, x, y, lo, hi };
+  }
+  function drawTrace() {
+    const dpr = window.devicePixelRatio || 1, w = trc.clientWidth, h = trc.clientHeight;
+    if (!w) return;
+    trc.width = Math.round(w * dpr); trc.height = Math.round(h * dpr);
+    const c = tctx; c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, w, h);
+    const S = traceScale();
+    c.font = `400 11px ${T.mono}`; c.textBaseline = "middle";
+    // y grid at decades
+    const ticks = [0.1, 1, 10, 100, 1000, 10000].filter(v => v <= S.hi);
+    ticks.forEach(v => {
+      const yy = Math.round(S.y(v)) + .5; c.strokeStyle = T.grid; c.lineWidth = 1; c.beginPath(); c.moveTo(TM.l, yy); c.lineTo(w - TM.r, yy); c.stroke();
+      c.fillStyle = T.muted; c.textAlign = "right"; c.fillText(v >= 1 ? v + " s" : v + " s", TM.l - 8, yy);
+    });
+    // x axis
+    c.strokeStyle = T.line; c.beginPath(); c.moveTo(TM.l, h - TM.b + .5); c.lineTo(w - TM.r, h - TM.b + .5); c.stroke();
+    c.textAlign = "center"; c.textBaseline = "top"; c.fillStyle = T.muted;
+    for (let m = 0; m <= cfg.duration / 60; m += 2) c.fillText(m + " min", S.x(m * 60), h - TM.b + 7);
+    if (!trace.length) {
+      c.fillStyle = T.muted; c.textBaseline = "middle"; c.font = `400 13px ${T.body}`;
+      c.fillText("The line starts after the first two simulated seconds.", (TM.l + w - TM.r) / 2, (TM.t + h - TM.b) / 2);
+      return;
+    }
+    // p99 area + line
+    c.beginPath(); trace.forEach((d, i) => { const X = S.x(d.t), Y = S.y(d.p99); i ? c.lineTo(X, Y) : c.moveTo(X, Y); });
+    c.lineTo(S.x(trace[trace.length - 1].t), h - TM.b); c.lineTo(S.x(trace[0].t), h - TM.b); c.closePath();
+    c.globalAlpha = .08; c.fillStyle = T.ink; c.fill(); c.globalAlpha = 1;
+    c.beginPath(); trace.forEach((d, i) => { const X = S.x(d.t), Y = S.y(d.p99); i ? c.lineTo(X, Y) : c.moveTo(X, Y); });
+    c.strokeStyle = T.ink; c.lineWidth = 2; c.lineJoin = "round"; c.stroke();
+    // p50 dashed
+    c.beginPath(); trace.forEach((d, i) => { const X = S.x(d.t), Y = S.y(d.p50); i ? c.lineTo(X, Y) : c.moveTo(X, Y); });
+    c.setLineDash([5, 4]); c.strokeStyle = T.ink2; c.lineWidth = 2; c.stroke(); c.setLineDash([]);
+    // endpoint markers
+    const last = trace[trace.length - 1];
+    [[last.p99, T.ink], [last.p50, T.ink2]].forEach(([v, col]) => { c.beginPath(); c.arc(S.x(last.t), S.y(v), 4.5, 0, Math.PI * 2); c.fillStyle = T.surface; c.fill(); c.beginPath(); c.arc(S.x(last.t), S.y(v), 3, 0, Math.PI * 2); c.fillStyle = col; c.fill(); });
+    // hover
+    if (hoverX !== null) {
+      const tAt = (hoverX - TM.l) / (w - TM.l - TM.r) * cfg.duration;
+      let best = trace[0]; trace.forEach(d => { if (Math.abs(d.t - tAt) < Math.abs(best.t - tAt)) best = d; });
+      const X = S.x(best.t);
+      c.strokeStyle = T.line; c.lineWidth = 1; c.beginPath(); c.moveTo(X + .5, TM.t); c.lineTo(X + .5, h - TM.b); c.stroke();
+      [[best.p99, T.ink], [best.p50, T.ink2]].forEach(([v, col]) => { c.beginPath(); c.arc(X, S.y(v), 4, 0, Math.PI * 2); c.fillStyle = col; c.fill(); });
+      tip.hidden = false;
+      tip.innerHTML = `${fmtClock(best.t)} simulated<br>p99 ${fmtS(best.p99)}<br>p50 ${fmtS(best.p50)}`;
+      const tw = tip.offsetWidth; tip.style.left = Math.min(w - tw, Math.max(0, X + 12 + tw > w ? X - tw - 12 : X + 12)) + "px"; tip.style.top = (TM.t + 4) + "px";
+    } else tip.hidden = true;
+  }
+  trc.addEventListener("pointermove", e => { const r = trc.getBoundingClientRect(); hoverX = e.clientX - r.left; if (hoverX < TM.l) hoverX = null; drawTrace(); });
+  trc.addEventListener("pointerleave", () => { hoverX = null; drawTrace(); });
+
+  // ---------- comparison
+  let cmpResults = null, worker = null, cmpToken = 0;
+  function makeWorker() {
+    try {
+      const code = SRC + `\nonmessage = e => { const c = e.data.cfg, tok = e.data.tok; const W = makeWorkload(c); const out = [];
+        STRATS.forEach((s, i) => { const f = new Fleet(c, s.id); for (const q of W.reqs) f.serve(q); out.push(Object.assign({ id: s.id }, f.summary(c.duration))); postMessage({ tok, progress: i + 1 }); });
+        postMessage({ tok, done: true, results: out, n: W.reqs.length }); };`;
+      return new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+    } catch (e) { return null; }
+  }
+  function runComparison() {
+    const tok = ++cmpToken, c = Object.assign({}, cfg);
+    $("progress").hidden = false; $("progress").textContent = "Simulating 0 of 6 strategies…";
+    $("verdict").textContent = "Running the comparison…";
+    const onMsg = d => {
+      if (d.tok !== cmpToken) return;
+      if (d.progress) $("progress").textContent = `Simulating ${d.progress} of 6 strategies…`;
+      if (d.done) { $("progress").hidden = true; cmpResults = { results: d.results, n: d.n, cfg: c }; renderComparison(); }
+    };
+    if (worker === null) worker = makeWorker() || false;
+    if (worker) { worker.onmessage = e => onMsg(e.data); worker.onerror = () => { worker = false; runComparison(); }; worker.postMessage({ cfg: c, tok }); return; }
+    // fallback: main thread, one strategy per tick
+    const Wl = E.makeWorkload(c), out = []; let i = 0;
+    const step = () => {
+      if (tok !== cmpToken) return;
+      const s = E.STRATS[i], f = new E.Fleet(c, s.id); for (const q of Wl.reqs) f.serve(q);
+      out.push(Object.assign({ id: s.id }, f.summary(c.duration))); i++;
+      onMsg({ tok, progress: i });
+      if (i < E.STRATS.length) setTimeout(step, 0); else onMsg({ tok, done: true, results: out, n: Wl.reqs.length });
+    };
+    setTimeout(step, 0);
+  }
+  function renderComparison() {
+    if (!cmpResults) return;
+    const { results, n, cfg: c } = cmpResults, name = id => E.STRATS.find(s => s.id === id).name;
+    const byP99 = results.slice().sort((a, b) => a.p99 - b.p99), best = byP99[0], worst = byP99[byP99.length - 1];
+    $("verdict").innerHTML = `At ${c.rate} req/s on ${c.replicas} GPUs, <b>${name(best.id)}</b> keeps the slowest 1% of first tokens to ${fmtS(best.p99)}. <b>${name(worst.id)}</b> is worst at ${fmtS(worst.p99)}.`;
+    $("cmp-sub").textContent = `Each strategy ran the identical workload: ${fmtClock(c.duration)} minutes simulated, ${n.toLocaleString()} requests, ${Math.round(c.cacheTokens / 1000)}k-token KV cache per GPU. Hover a bar for every metric.`;
+    const lo = 0.05, hi = Math.max(1, ...results.map(r => r.p99)) * 1.15;
+    const logW = v => Math.max(0.01, (Math.log10(Math.max(lo, v)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)));
+    fillBars($("bars-p99"), results, r => logW(r.p99), r => fmtS(r.p99));
+    fillBars($("bars-hit"), results, r => r.hit, r => fmtPct(r.hit));
+    $("tbl").querySelector("tbody").innerHTML = results.map(r => `<tr><td>${name(r.id)}</td><td>${fmtPct(r.hit)}</td><td>${fmtS(r.p50)}</td><td>${fmtS(r.p99)}</td><td>${r.imb.toFixed(2)}×</td><td>${Math.round(r.util * 100)}%</td></tr>`).join("");
+    markCurrent();
+  }
+  function fillBars(box, results, frac, label) {
+    box.querySelectorAll(".bar-row").forEach(e => e.remove());
+    results.forEach(r => {
+      const row = document.createElement("div"); row.className = "bar-row"; row.dataset.id = r.id;
+      row.title = `${E.STRATS.find(s => s.id === r.id).name}: cache hits ${fmtPct(r.hit)}, p50 ${fmtS(r.p50)}, p99 ${fmtS(r.p99)}, imbalance ${r.imb.toFixed(2)}×, utilization ${Math.round(r.util * 100)}%`;
+      row.innerHTML = `<span class="name">${E.STRATS.find(s => s.id === r.id).name}</span><span class="bar-track"><span class="bar-fill" style="width:${(frac(r) * 100).toFixed(1)}%"></span></span><span class="val">${label(r)}</span>`;
+      box.appendChild(row);
+    });
+  }
+  function markCurrent() { document.querySelectorAll(".bar-row").forEach(r => r.classList.toggle("cur", r.dataset.id === strategy)); }
+
+  // ---------- boot
+  syncStrat(); syncSpeed(); syncOutputs(); newWorkload(); resetLive();
+  if (reduceMotion) { advance(200, false); updateMetrics(); drawTrace(); }
+  runComparison();
+
+  let last = performance.now(), lastUi = 0, lastTrace = 0;
+  function frame(now) {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if (playing && !done) advance(dt * speed, !reduceMotion);
+    drawStage(now);
+    if (now - lastUi > 250) { updateMetrics(); lastUi = now; }
+    if (now - lastTrace > 500 && playing) { drawTrace(); lastTrace = now; }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
