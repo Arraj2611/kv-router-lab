@@ -5,10 +5,10 @@ Work top to bottom unless the owner says otherwise. Each task lists what "done" 
 ## Phase 1 — Ship it publicly
 
 ### 1. Publish the repo and the live demo
-- [ ] Public GitHub repo `kv-router-lab` with this folder pushed to `main`
-- [ ] GitHub Pages enabled from `main`, root; the live URL loads the lab
-- [ ] README's "Live demo" line points at the real Pages URL
-- [ ] Repo description and topics set: `llm`, `inference`, `kv-cache`, `vllm`, `sglang`, `simulation`
+- [x] Public GitHub repo `kv-router-lab` with this folder pushed to `main`
+- [x] GitHub Pages enabled from `main`, root; the live URL loads the lab
+- [x] README's "Live demo" line points at the real Pages URL
+- [x] Repo description and topics set: `llm`, `inference`, `kv-cache`, `vllm`, `sglang`, `simulation`
 
 **Done when:** the Pages URL works in a private browser window on desktop and phone.
 
