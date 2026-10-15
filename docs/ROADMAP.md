@@ -25,8 +25,8 @@ The Python and JS engines must agree on strategy ranking.
 - [x] Referenced at the top of the README
 
 ### 4. Small page polish
-- [ ] Shareable deep link to a strategy via a bare hash token (e.g. `#prefix`, `#kv`); only plain tokens, no `key=value`
-- [ ] "Copy settings" button that copies the matching CLI command
+- [x] Shareable deep link to a strategy via a bare hash token (e.g. `#prefix`, `#kv`); only plain tokens, no `key=value`
+- [x] "Copy settings" button that copies the matching CLI command
 
 ## Phase 2 — Make it real (highest value for the portfolio)
 

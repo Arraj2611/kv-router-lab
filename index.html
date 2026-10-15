@@ -153,7 +153,7 @@ th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
       <div class="ctl"><span class="ctl-label" id="speed-label">Speed</span>
         <div class="seg" id="speed" role="group" aria-labelledby="speed-label"></div></div>
       <div class="ctl"><span class="ctl-label">&nbsp;</span>
-        <div class="seg"><button class="btn primary" id="play" type="button">Pause</button><button class="btn" id="reset" type="button">Restart</button></div></div>
+        <div class="seg"><button class="btn primary" id="play" type="button">Pause</button><button class="btn" id="reset" type="button">Restart</button><button class="btn" id="copy-settings" type="button">Copy settings</button></div></div>
     </div>
   </section>
 
@@ -315,7 +315,8 @@ class Fleet {
   const cfg = { seed: 7, products: 6, zipf: 1.2, sysMin: 1000, sysMax: 6000, maxTurns: 9, think: 20,
     tps: 8000, overhead: 0.02, thresh: 0.5, slack: 1.0, duration: 600, rate: 18, replicas: 4, cacheTokens: 60000 };
   const SPEEDS = [{ v: 2, l: "2×" }, { v: 6, l: "6×" }, { v: 20, l: "20×" }];
-  let strategy = "kv", speed = 6;
+  const hashId = location.hash.slice(1);
+  let strategy = E.STRATS.some(s => s.id === hashId) ? hashId : "kv", speed = 6;
   const $ = id => document.getElementById(id);
   const LETTERS = "ABCDEF";
 
@@ -340,8 +341,12 @@ class Fleet {
   const stratBox = $("strats");
   E.STRATS.forEach(s => {
     const b = document.createElement("button"); b.type = "button"; b.textContent = s.name; b.dataset.id = s.id; b.id = "strat-" + s.id;
-    b.addEventListener("click", () => { strategy = s.id; syncStrat(); resetLive(); markCurrent(); });
+    b.addEventListener("click", () => { strategy = s.id; history.replaceState(null, "", "#" + s.id); syncStrat(); resetLive(); markCurrent(); });
     stratBox.appendChild(b);
+  });
+  addEventListener("hashchange", () => {
+    const id = location.hash.slice(1);
+    if (E.STRATS.some(s => s.id === id) && id !== strategy) { strategy = id; syncStrat(); resetLive(); markCurrent(); }
   });
   function syncStrat() {
     stratBox.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.id === strategy)));
@@ -373,6 +378,24 @@ class Fleet {
   });
   $("reset").addEventListener("click", () => { resetLive(); playing = true; syncPlay(); });
   function syncPlay() { $("play").textContent = playing ? "Pause" : done ? "Replay" : "Play"; }
+
+  function cliCommand() {
+    return `python sim/cache_router_sim.py --replicas ${cfg.replicas} --cache-tokens ${cfg.cacheTokens} --duration ${cfg.duration} --rates ${cfg.rate}`;
+  }
+  function fallbackCopy(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+  $("copy-settings").addEventListener("click", () => {
+    const cmd = cliCommand(), btn = $("copy-settings"), original = btn.textContent;
+    const showCopied = () => { btn.textContent = "Copied"; setTimeout(() => { btn.textContent = original; }, 1400); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(cmd).then(showCopied, () => { fallbackCopy(cmd); showCopied(); });
+    } else { fallbackCopy(cmd); showCopied(); }
+  });
 
   // ---------- live simulation state
   let W, fleet, idx, simT, recent, trace, nextSample, dots, flashes, playing = !reduceMotion, done = false;
