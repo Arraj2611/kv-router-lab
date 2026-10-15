@@ -21,8 +21,8 @@ The Python and JS engines must agree on strategy ranking.
 **Done when:** CI is green and a deliberately broken strategy in one engine makes it fail.
 
 ### 3. Demo GIF
-- [ ] `docs/demo.gif`, 10–15 s, under 5 MB: Prefix hash at 18 req/s until GPU 1's queue goes red, then switch to KV-aware cost
-- [ ] Referenced at the top of the README
+- [x] `docs/demo.gif`, 10–15 s, under 5 MB: Prefix hash at 18 req/s until GPU 1's queue goes red, then switch to KV-aware cost
+- [x] Referenced at the top of the README
 
 ### 4. Small page polish
 - [ ] Shareable deep link to a strategy via a bare hash token (e.g. `#prefix`, `#kv`); only plain tokens, no `key=value`
