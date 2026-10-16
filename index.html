@@ -143,6 +143,7 @@ th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
       <div class="seg" id="strats" role="group" aria-labelledby="strat-label"></div>
     </div>
     <p class="strat-desc" id="strat-desc"></p>
+    <p class="strat-desc" id="trace-msg" role="status" hidden></p>
     <div class="ctl-row">
       <label class="ctl" for="rate"><span class="ctl-label">Traffic</span>
         <span class="range"><input type="range" id="rate" min="2" max="24" step="1" value="18"><output id="rate-out"></output></span></label>
@@ -154,6 +155,9 @@ th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
         <span class="range"><input type="range" id="cpu" min="0" max="200000" step="20000" value="0"><output id="cpu-out"></output></span></label>
       <div class="ctl"><span class="ctl-label" id="speed-label">Speed</span>
         <div class="seg" id="speed" role="group" aria-labelledby="speed-label"></div></div>
+      <div class="ctl"><span class="ctl-label" id="trace-label">Workload</span>
+        <div class="seg" role="group" aria-labelledby="trace-label"><button class="btn" id="trace-load" type="button">Load trace…</button><button class="btn" id="trace-clear" type="button" hidden>Use synthetic</button></div>
+        <input type="file" id="trace-file" accept=".jsonl,.json,.txt" hidden></div>
       <div class="ctl"><span class="ctl-label">&nbsp;</span>
         <div class="seg"><button class="btn primary" id="play" type="button">Pause</button><button class="btn" id="reset" type="button">Restart</button><button class="btn" id="copy-settings" type="button">Copy settings</button></div></div>
     </div>
@@ -220,7 +224,50 @@ function h32(a, b) { let x = Math.imul((a | 0) ^ 0x9e3779b9, 0x85ebca6b) ^ (b | 
 function expo(r, rate) { return -Math.log(1 - r()) / rate; }
 function randint(r, a, b) { return a + Math.floor(r() * (b - a + 1)); }
 
+// Parse a JSONL request trace (format: docs/TRACE_FORMAT.md) into the same workload shape makeWorkload
+// returns. Mirrored rule for rule by parse_trace() in sim/cache_router_sim.py. Throws Error("line N: ...").
+function parseTrace(text) {
+  const rows = [], lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i].trim(); if (!raw) continue; const ln = i + 1;
+    let o; try { o = JSON.parse(raw); } catch (e) { throw new Error(`line ${ln}: invalid JSON`); }
+    if (o === null || typeof o !== "object" || Array.isArray(o)) throw new Error(`line ${ln}: expected a JSON object`);
+    const num = (k, required = true) => {
+      const v = o[k];
+      if (v === undefined || v === null) { if (required) throw new Error(`line ${ln}: missing '${k}'`); return null; }
+      if (typeof v !== "number" || !Number.isFinite(v)) throw new Error(`line ${ln}: '${k}' must be a number`);
+      return v;
+    };
+    const ident = k => {
+      const v = o[k];
+      if (v === undefined || v === null) throw new Error(`line ${ln}: missing '${k}'`);
+      if (typeof v !== "string" && !(typeof v === "number" && Number.isInteger(v))) throw new Error(`line ${ln}: '${k}' must be a string or an integer`);
+      return String(v);
+    };
+    const t = num("t"); if (t < 0) throw new Error(`line ${ln}: 't' must be >= 0`);
+    const tokens = num("tokens"); if (!Number.isInteger(tokens) || tokens < 1) throw new Error(`line ${ln}: 'tokens' must be an integer >= 1`);
+    const pt = num("prefix_tokens", false); if (pt !== null && (!Number.isInteger(pt) || pt < 0)) throw new Error(`line ${ln}: 'prefix_tokens' must be an integer >= 0`);
+    rows.push({ t, session: ident("session"), tokens, prefix: ident("prefix_id"), pt });
+  }
+  if (!rows.length) throw new Error("trace has no requests");
+  rows.sort((a, b) => a.t - b.t);  // stable: ties keep file order
+  const t0 = rows[0].t, shortest = new Map();
+  for (const r of rows) shortest.set(r.prefix, Math.min(r.tokens, shortest.has(r.prefix) ? shortest.get(r.prefix) : r.tokens));
+  const sess = new Map(), pref = new Map(), fallback = [], reqs = [], sysLen = [], count = [];
+  for (const r of rows) {
+    if (!sess.has(r.session)) sess.set(r.session, sess.size);
+    if (!pref.has(r.prefix)) { pref.set(r.prefix, pref.size); sysLen.push(0); count.push(0); }
+    const p = pref.get(r.prefix); let pt = r.pt;
+    if (pt === null) { if (!fallback.includes(r.prefix)) fallback.push(r.prefix); pt = shortest.get(r.prefix); }
+    const shared = Math.min(pt, r.tokens); sysLen[p] = Math.max(sysLen[p], shared); count[p]++;
+    reqs.push({ t: r.t - t0, sid: sess.get(r.session), p, tokens: r.tokens, sysFull: Math.floor(shared / BLOCK), n: Math.floor(r.tokens / BLOCK) });
+  }
+  return { reqs, sysLen, names: Array.from(pref.keys()), weights: count.map(n => n / rows.length), duration: Math.max(rows[rows.length - 1].t - t0, 1),
+    sessions: sess.size, prefixes: pref.size, fallbackPrefixes: fallback };
+}
+
 function makeWorkload(c) {
+  if (c.trace) return c.trace;  // replaying a parsed trace instead of generating a synthetic workload
   const r = rng(c.seed), P = c.products;
   const sysLen = []; for (let p = 0; p < P; p++) sysLen.push(randint(r, c.sysMin, c.sysMax));
   const w = []; let ws = 0; for (let k = 0; k < P; k++) { const v = 1 / Math.pow(k + 1, c.zipf); w.push(v); ws += v; }
@@ -336,7 +383,7 @@ class Fleet {
 <script>
 (() => {
   const SRC = document.getElementById("engine-src").textContent;
-  const E = new Function(SRC + "\nreturn { makeWorkload, Fleet, STRATS, BLOCK };")();
+  const E = new Function(SRC + "\nreturn { makeWorkload, parseTrace, Fleet, STRATS, BLOCK };")();
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   const cfg = { seed: 7, products: 6, zipf: 1.2, sysMin: 1000, sysMax: 6000, maxTurns: 9, think: 20,
@@ -388,7 +435,7 @@ class Fleet {
   function syncSpeed() { speedBox.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.id === "speed-" + speed))); }
 
   function syncOutputs() {
-    $("rate-out").textContent = cfg.rate + " req/s";
+    $("rate-out").textContent = cfg.trace ? cfg.rate.toFixed(1) + " req/s (trace)" : cfg.rate + " req/s";
     $("reps-out").textContent = cfg.replicas + " GPUs";
     $("cache-out").textContent = Math.round(cfg.cacheTokens / 1000) + "k tokens";
     $("cpu-out").textContent = cfg.cpuTokens ? Math.round(cfg.cpuTokens / 1000) + "k tokens" : "off";
@@ -400,6 +447,30 @@ class Fleet {
       clearTimeout(debounce); debounce = setTimeout(() => { newWorkload(); resetLive(); runComparison(); }, 350);
     });
   });
+  // ---------- trace replay: a parsed JSONL trace replaces the synthetic workload (see docs/TRACE_FORMAT.md)
+  const synthetic = { products: cfg.products, duration: cfg.duration };
+  function showTraceMsg(text, bad) { const m = $("trace-msg"); m.hidden = !text; m.textContent = text || ""; m.style.color = bad ? "var(--serious)" : ""; }
+  function applyWorkload() { syncOutputs(); newWorkload(); resetLive(); runComparison(); }
+  $("trace-load").addEventListener("click", () => $("trace-file").click());
+  $("trace-file").addEventListener("change", e => {
+    const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+    const rd = new FileReader();
+    rd.onerror = () => showTraceMsg(`Could not read ${f.name}.`, true);
+    rd.onload = () => {
+      let w; try { w = E.parseTrace(String(rd.result)); } catch (err) { showTraceMsg(`${f.name}: ${err.message}`, true); return; }
+      cfg.trace = w; cfg.products = w.prefixes; cfg.duration = w.duration; cfg.rate = w.reqs.length / w.duration;
+      $("rate").disabled = true; $("trace-clear").hidden = false;
+      showTraceMsg(`Replaying ${f.name}: ${w.reqs.length.toLocaleString()} requests, ${w.sessions.toLocaleString()} sessions, ${w.prefixes} shared prefix${w.prefixes === 1 ? "" : "es"}, ${fmtClock(w.duration)}.` +
+        (w.fallbackPrefixes.length ? ` No prefix_tokens for ${w.fallbackPrefixes.join(", ")}: assumed each shares its shortest prompt's length, which can overstate sharing.` : ""), false);
+      applyWorkload();
+    };
+    rd.readAsText(f);
+  });
+  $("trace-clear").addEventListener("click", () => {
+    delete cfg.trace; cfg.products = synthetic.products; cfg.duration = synthetic.duration; cfg.rate = +$("rate").value;
+    $("rate").disabled = false; $("trace-clear").hidden = true; showTraceMsg("");
+    applyWorkload();
+  });
   $("play").addEventListener("click", () => {
     if (done) { resetLive(); playing = true; } else playing = !playing;
     syncPlay();
@@ -408,7 +479,8 @@ class Fleet {
   function syncPlay() { $("play").textContent = playing ? "Pause" : done ? "Replay" : "Play"; }
 
   function cliCommand() {
-    return `python sim/cache_router_sim.py --replicas ${cfg.replicas} --cache-tokens ${cfg.cacheTokens} --duration ${cfg.duration} --rates ${cfg.rate}` + (cfg.cpuTokens ? ` --cpu-tokens ${cfg.cpuTokens}` : "");
+    const load = cfg.trace ? `--trace YOUR_TRACE.jsonl` : `--duration ${cfg.duration} --rates ${cfg.rate}`;
+    return `python sim/cache_router_sim.py --replicas ${cfg.replicas} --cache-tokens ${cfg.cacheTokens} ${load}` + (cfg.cpuTokens ? ` --cpu-tokens ${cfg.cpuTokens}` : "");
   }
   function fallbackCopy(text) {
     const ta = document.createElement("textarea");
@@ -464,11 +536,14 @@ class Fleet {
 
   function buildLegend() {
     const L = $("legend"); L.innerHTML = "";
-    W.sysLen.forEach((len, i) => {
-      const s = document.createElement("span");
-      s.innerHTML = `<i class="sw" style="background:var(--p${i})"></i>Prompt ${LETTERS[i]} · ${len.toLocaleString()} tok · ${Math.round(W.weights[i] * 100)}% of chats`;
+    const esc = t => String(t).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+    // The six product colours are a fixed validated palette; a trace with more prefixes reuses them in order.
+    W.sysLen.slice(0, 6).forEach((len, i) => {
+      const s = document.createElement("span"), name = W.names ? esc(W.names[i]) : "Prompt " + LETTERS[i];
+      s.innerHTML = `<i class="sw" style="background:var(--p${i})"></i>${name} · ${len.toLocaleString()} tok · ${Math.round(W.weights[i] * 100)}% of ${W.names ? "requests" : "chats"}`;
       L.appendChild(s);
     });
+    if (W.sysLen.length > 6) { const s = document.createElement("span"); s.textContent = `+ ${W.sysLen.length - 6} more prefixes (colours repeat)`; L.appendChild(s); }
     const s = document.createElement("span"); s.innerHTML = `<i class="sw" style="background:var(--session)"></i>Chat history (one user's)`; L.appendChild(s);
   }
 
@@ -537,7 +612,7 @@ class Fleet {
       let x = px;
       for (let k = 0; k <= cfg.products; k++) {
         const n = R.cat[k]; if (!n) continue; const segW = pw * n / R.cap; if (segW < .5) continue;
-        c.fillStyle = k === cfg.products ? T.session : T.p[k];
+        c.fillStyle = k === cfg.products ? T.session : T.p[k % 6];
         rr(c, x, y, Math.max(1, segW - 2), 14, 2); c.fill(); x += segW;
       }
       if (cfg.cpuTokens) {  // CPU offload tier: second, thinner bar, same product colours
@@ -545,7 +620,7 @@ class Fleet {
         let cx = px;
         for (let k = 0; k <= cfg.products; k++) {
           const n = R.cpuCat[k]; if (!n) continue; const segW = pw * n / R.cpuCap; if (segW < .5) continue;
-          c.fillStyle = k === cfg.products ? T.session : T.p[k];
+          c.fillStyle = k === cfg.products ? T.session : T.p[k % 6];
           rr(c, cx, by, Math.max(1, segW - 1.5), 6, 1.5); c.fill(); cx += segW;
         }
         c.textAlign = "left"; c.fillStyle = T.muted; c.font = `400 10.5px ${T.body}`; c.fillText("CPU tier " + Math.round(R.cpu.size / R.cpuCap * 100) + "%", px, by + 18);
@@ -562,7 +637,7 @@ class Fleet {
     dots.forEach(d => {
       const p = panels[d.ri]; if (!p) return; const k = (now - d.t0) / life, e = 1 - Math.pow(1 - k, 3), pos = bez(p, e);
       c.beginPath(); c.arc(pos.x, pos.y, 5, 0, Math.PI * 2); c.fillStyle = T.surface; c.fill();
-      c.beginPath(); c.arc(pos.x, pos.y, 3.6, 0, Math.PI * 2); c.fillStyle = T.p[d.p]; c.fill();
+      c.beginPath(); c.arc(pos.x, pos.y, 3.6, 0, Math.PI * 2); c.fillStyle = T.p[d.p % 6]; c.fill();
     });
   }
 
@@ -663,7 +738,7 @@ class Fleet {
     if (!cmpResults) return;
     const { results, n, cfg: c } = cmpResults, name = id => E.STRATS.find(s => s.id === id).name;
     const byP99 = results.slice().sort((a, b) => a.p99 - b.p99), best = byP99[0], worst = byP99[byP99.length - 1];
-    $("verdict").innerHTML = `At ${c.rate} req/s on ${c.replicas} GPUs, <b>${name(best.id)}</b> keeps the slowest 1% of first tokens to ${fmtS(best.p99)}. <b>${name(worst.id)}</b> is worst at ${fmtS(worst.p99)}.`;
+    $("verdict").innerHTML = `At ${c.trace ? c.rate.toFixed(1) + " req/s (replaying your trace)" : c.rate + " req/s"} on ${c.replicas} GPUs, <b>${name(best.id)}</b> keeps the slowest 1% of first tokens to ${fmtS(best.p99)}. <b>${name(worst.id)}</b> is worst at ${fmtS(worst.p99)}.`;
     $("cmp-sub").textContent = `Each strategy ran the identical workload: ${fmtClock(c.duration)} minutes simulated, ${n.toLocaleString()} requests, ${Math.round(c.cacheTokens / 1000)}k-token KV cache per GPU${c.cpuTokens ? ` plus a ${Math.round(c.cpuTokens / 1000)}k-token CPU offload tier` : ""}. Hover a bar for every metric.`;
     const lo = 0.05, hi = Math.max(1, ...results.map(r => r.p99)) * 1.15;
     const logW = v => Math.max(0.01, (Math.log10(Math.max(lo, v)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)));

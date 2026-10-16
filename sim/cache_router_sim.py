@@ -34,6 +34,8 @@ from __future__ import annotations
 import argparse
 import bisect
 import csv
+import json
+import math
 from dataclasses import dataclass
 
 BLOCK = 16  # tokens per KV block
@@ -148,6 +150,82 @@ def generate_workload(args) -> list[Request]:
         sid += 1
     requests.sort(key=lambda req: req.t)
     return requests
+
+
+def parse_trace(text: str) -> tuple[list[Request], dict]:
+    """Parse a JSONL request trace (format: docs/TRACE_FORMAT.md) into the simulator's Request list.
+
+    One JSON object per line: t (seconds, >= 0), session (string or integer), tokens (integer >= 1,
+    full prompt length), prefix_id (string or integer; requests with the same id share a prompt prefix),
+    and optional prefix_tokens (integer >= 0, length of that shared prefix). Mirrored rule for rule by
+    parseTrace() in index.html. Raises ValueError("line N: ...") on bad input."""
+    rows = []
+    for ln, raw in enumerate(text.split("\n"), 1):  # "\n" only (not splitlines): identical in the JS parser
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            raise ValueError(f"line {ln}: invalid JSON") from None
+        if not isinstance(obj, dict):
+            raise ValueError(f"line {ln}: expected a JSON object")
+
+        def num(key, required=True):
+            v = obj.get(key)
+            if v is None:
+                if required:
+                    raise ValueError(f"line {ln}: missing '{key}'")
+                return None
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(f"line {ln}: '{key}' must be a number")
+            return v
+
+        def ident(key):
+            v = obj.get(key)
+            if v is None:
+                raise ValueError(f"line {ln}: missing '{key}'")
+            if isinstance(v, float) and math.isfinite(v) and v == int(v):
+                v = int(v)  # 5.0 and 5 are the same number in JS, so they must be the same id here
+            if isinstance(v, bool) or not isinstance(v, (str, int)):
+                raise ValueError(f"line {ln}: '{key}' must be a string or an integer")
+            return str(v)
+
+        t = num("t")
+        if t < 0:  # (mirrored in parseTrace)
+            raise ValueError(f"line {ln}: 't' must be >= 0")
+        tokens = num("tokens")
+        if tokens != int(tokens) or tokens < 1:
+            raise ValueError(f"line {ln}: 'tokens' must be an integer >= 1")
+        ptoks = num("prefix_tokens", required=False)
+        if ptoks is not None and (ptoks != int(ptoks) or ptoks < 0):
+            raise ValueError(f"line {ln}: 'prefix_tokens' must be an integer >= 0")
+        rows.append((t, ident("session"), int(tokens), ident("prefix_id"), None if ptoks is None else int(ptoks)))
+    if not rows:
+        raise ValueError("trace has no requests")
+
+    rows.sort(key=lambda r: r[0])  # stable: ties keep file order
+    t0 = rows[0][0]
+    # Without prefix_tokens, assume every request with a prefix_id shares its shortest prompt's worth of
+    # tokens. This is a guess that can overstate sharing; callers are told which prefixes used it.
+    shortest: dict[str, int] = {}
+    for _, _, tokens, pid, _ in rows:
+        shortest[pid] = min(tokens, shortest.get(pid, tokens))
+    sess_ids: dict[str, int] = {}
+    pref_ids: dict[str, int] = {}
+    fallback: list[str] = []
+    out = []
+    for t, sess, tokens, pid, ptoks in rows:
+        sid = sess_ids.setdefault(sess, len(sess_ids))
+        p = pref_ids.setdefault(pid, len(pref_ids))
+        if ptoks is None:
+            if pid not in fallback:
+                fallback.append(pid)
+            ptoks = shortest[pid]
+        out.append(Request(t - t0, sid, p, tokens, min(ptoks, tokens) // BLOCK, tokens // BLOCK))
+    info = {"sessions": len(sess_ids), "prefixes": len(pref_ids), "duration": max(rows[-1][0] - t0, 1.0),
+            "fallback_prefixes": fallback}
+    return out, info
 
 
 # --------------------------------------------------------------------------- replicas
@@ -398,6 +476,8 @@ def main():
     ap.add_argument("--replicas", type=int, default=4)
     ap.add_argument("--cache-tokens", type=int, default=60_000, help="KV cache capacity per replica (tokens)")
     ap.add_argument("--rates", default="6,14,20", help="comma-separated request rates to test (req/s, whole fleet)")
+    ap.add_argument("--trace", help="replay this JSONL request trace instead of the synthetic workload "
+                                    "(format: docs/TRACE_FORMAT.md); --rates, --duration and the workload flags are ignored")
     ap.add_argument("--duration", type=float, default=900, help="simulated seconds")
     ap.add_argument("--products", type=int, default=6, help="distinct system prompts")
     ap.add_argument("--zipf", type=float, default=1.2, help="popularity skew; higher = hotter top prompt")
@@ -427,11 +507,30 @@ def main():
         print(f"profile {args.profile}: prefill_tps={args.prefill_tps:,.0f} overhead={args.overhead * 1000:.1f}ms "
               f"cached_tps={args.cached_tps:,.0f}")
 
+    runs = []  # (rate, requests, header line)
+    if args.trace:
+        try:
+            with open(args.trace, encoding="utf-8") as f:
+                requests, info = parse_trace(f.read())
+        except (OSError, ValueError) as e:
+            ap.error(f"--trace {args.trace}: {e}")
+        args.duration = info["duration"]
+        rate = len(requests) / args.duration
+        head = (f"trace {args.trace} · {len(requests)} requests · {info['sessions']} sessions · "
+                f"{info['prefixes']} shared prefixes · {args.duration:g}s · {rate:.2f} req/s")
+        if info["fallback_prefixes"]:
+            head += (f"\nwarning: no prefix_tokens for prefix_id {info['fallback_prefixes']}; assumed each shares its "
+                     f"shortest prompt's length, which can overstate sharing")
+        runs.append((rate, requests, head))
+    else:
+        for rate in [float(x) for x in args.rates.split(",")]:
+            args.rate = rate
+            runs.append((rate, generate_workload(args), f"rate {rate:g} req/s · "))
+
     rows = []
-    for rate in [float(x) for x in args.rates.split(",")]:
+    for rate, requests, head in runs:
         args.rate = rate
-        requests = generate_workload(args)
-        print(f"\nrate {rate:g} req/s · {len(requests)} requests · {args.replicas} replicas · "
+        print(f"\n{head if args.trace else head + str(len(requests)) + ' requests'} · {args.replicas} replicas · "
               f"{args.cache_tokens:,} cache tokens each")
         print(f"{'strategy':<20}{'hit rate':>9}{'TTFT p50':>10}{'TTFT p99':>10}{'imbalance':>11}{'util':>7}"
               + (f"{'hits from CPU':>15}" if args.cpu_tokens else ""))

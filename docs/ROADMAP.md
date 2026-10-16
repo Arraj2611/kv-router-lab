@@ -53,8 +53,8 @@ The current model serves prefill one request at a time, which inflates queues ne
 - [x] Shown in the page as a second, thinner bar under each GPU's cache — plus a "CPU offload" slider and the share in the hits card
 
 ### 8. Real trace replay
-- [ ] Accept a JSONL trace (timestamp, session id, prompt token count, shared-prefix id)
-- [ ] Document the format; ship a small anonymized example
+- [x] Accept a JSONL trace (timestamp, session id, prompt token count, shared-prefix id) — plus optional `prefix_tokens`; CLI `--trace` and a "Load trace…" button on the page; both parsers cross-checked (`tools/trace_check.py`) and the example trace is in the parity check. The page's load/replay flow was only smoke-tested (loads, no console errors); loading a file through the UI has not been exercised in a browser yet.
+- [x] Document the format; ship a small anonymized example — `docs/TRACE_FORMAT.md`; the example is synthetic, not anonymized real traffic (no real traces available)
 
 ### 9. Replica failure
 - [ ] Kill a replica at time T, bring it back empty at T+Δ; show how fast each strategy's hit rate recovers

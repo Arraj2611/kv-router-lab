@@ -1,0 +1,26 @@
+{
+  "_comment": "Inputs for tools/trace_check.py. 'text' is a whole trace. Both parsers must either raise the same message or return the same requests.",
+  "cases": [
+    {"name": "empty", "text": ""},
+    {"name": "only blank lines", "text": "\n\n  \n"},
+    {"name": "not json", "text": "not json\n"},
+    {"name": "json array", "text": "[1,2]\n"},
+    {"name": "json null", "text": "null\n"},
+    {"name": "missing t", "text": "{\"session\":\"a\",\"tokens\":100,\"prefix_id\":\"p\"}\n"},
+    {"name": "negative t", "text": "{\"t\":-1,\"session\":\"a\",\"tokens\":100,\"prefix_id\":\"p\"}\n"},
+    {"name": "t is a string", "text": "{\"t\":\"1\",\"session\":\"a\",\"tokens\":100,\"prefix_id\":\"p\"}\n"},
+    {"name": "missing session", "text": "{\"t\":1,\"tokens\":100,\"prefix_id\":\"p\"}\n"},
+    {"name": "null prefix_id", "text": "{\"t\":1,\"session\":\"a\",\"tokens\":100,\"prefix_id\":null}\n"},
+    {"name": "tokens zero", "text": "{\"t\":1,\"session\":\"a\",\"tokens\":0,\"prefix_id\":\"p\"}\n"},
+    {"name": "tokens fractional", "text": "{\"t\":1,\"session\":\"a\",\"tokens\":1.5,\"prefix_id\":\"p\"}\n"},
+    {"name": "prefix_tokens negative", "text": "{\"t\":1,\"session\":\"a\",\"tokens\":100,\"prefix_id\":\"p\",\"prefix_tokens\":-1}\n"},
+    {"name": "session is boolean", "text": "{\"t\":1,\"session\":true,\"tokens\":100,\"prefix_id\":\"p\"}\n"},
+    {"name": "session fractional", "text": "{\"t\":1,\"session\":1.5,\"tokens\":100,\"prefix_id\":\"p\"}\n"},
+    {"name": "error reports the right line", "text": "{\"t\":1,\"session\":\"a\",\"tokens\":100,\"prefix_id\":\"p\"}\n\n{\"t\":2,\"session\":\"a\",\"tokens\":0,\"prefix_id\":\"p\"}\n"},
+    {"name": "ok: CRLF, blank lines, unsorted, tie order", "text": "{\"t\":5,\"session\":\"b\",\"tokens\":500,\"prefix_id\":\"q\",\"prefix_tokens\":300}\r\n\r\n{\"t\":2,\"session\":\"a\",\"tokens\":400,\"prefix_id\":\"p\",\"prefix_tokens\":333}\r\n{\"t\":2,\"session\":\"c\",\"tokens\":420,\"prefix_id\":\"p\",\"prefix_tokens\":333}\n"},
+    {"name": "ok: integer-valued float ids equal integer ids", "text": "{\"t\":1,\"session\":5.0,\"tokens\":100,\"prefix_id\":7,\"prefix_tokens\":50}\n{\"t\":2,\"session\":5,\"tokens\":120,\"prefix_id\":7.0,\"prefix_tokens\":50}\n"},
+    {"name": "ok: prefix_tokens larger than tokens is clamped", "text": "{\"t\":1,\"session\":\"a\",\"tokens\":100,\"prefix_id\":\"p\",\"prefix_tokens\":9999}\n"},
+    {"name": "ok: fallback when prefix_tokens missing uses shortest prompt", "text": "{\"t\":1,\"session\":\"a\",\"tokens\":900,\"prefix_id\":\"p\"}\n{\"t\":2,\"session\":\"b\",\"tokens\":700,\"prefix_id\":\"p\"}\n{\"t\":3,\"session\":\"c\",\"tokens\":10,\"prefix_id\":\"p\",\"prefix_tokens\":10}\n"},
+    {"name": "ok: single request", "text": "{\"t\":123456.5,\"session\":\"a\",\"tokens\":160,\"prefix_id\":\"p\",\"prefix_tokens\":32}\n"}
+  ]
+}

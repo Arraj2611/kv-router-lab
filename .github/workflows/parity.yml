@@ -19,3 +19,5 @@ jobs:
         run: node tools/parity_check.js
       - name: Compare against Python engine
         run: python tools/parity_check.py
+      - name: Trace parsers agree on bad and edge-case input
+        run: python tools/trace_check.py
