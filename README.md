@@ -64,6 +64,18 @@ Full numbers for three load levels are in [`sim/results.csv`](sim/results.csv).
 - Time to first token = queueing delay + prefill time. Prefill time = `overhead + uncached_tokens / prefill_tps + cached_tokens / cached_tps`. The last term is the cost of attending over an already-cached prefix; it defaults to 0 (cached tokens free), which is what the table above uses. Decoding is not modelled.
 - Optional CPU offload tier (`--cpu-tokens N`, or the "CPU offload" slider on the page): blocks evicted from the GPU spill into a CPU tier with its own capacity and LRU. A request matches the leading blocks present in either tier; blocks found on the CPU are copied back at `--reload-tps` (default 40,000 tokens/s, an unmeasured guess chosen to be several times faster than recompute) and re-enter the GPU cache. `cpu_hit_share` reports what fraction of cached tokens came from the CPU tier. Off by default, so the results table above is unchanged. Example at 20 req/s with the default cost model: adding 60k tokens of CPU tier per replica raised kv-aware cost's hit rate from 70.9% to 78.8% (9% of hits came from the CPU) and cut p99 TTFT from 1.06 s to 0.63 s; the table of strategies at other sizes is one command away.
 
+- Replica failure: `--fail-at T --fail-for D --fail-replica N` kills one replica at time T (both cache tiers lost, unroutable) and brings it back empty after D seconds. Requests already admitted still complete (no drops or retries), and strategies that ignore queue depth (round-robin, sticky, prefix-hash) fail over to the least-loaded live replica. The CLI then adds three columns: fleet hit rate in the 120 s before, the worst 5 s window from the failure on, and seconds after recovery until a 5 s window reaches 95% of the "before" rate (`never` if it doesn't within the run). Example, seed 7, 6 req/s, 4 replicas, GPU 2 down from 300 s to 420 s:
+
+  | strategy | hit before | worst 5 s window | recovery |
+  |---|---|---|---|
+  | round-robin | 66.8% | 48.6% | 15 s |
+  | least-loaded | 65.8% | 51.0% | 25 s |
+  | sticky-session | 81.5% | 61.2% | 15 s |
+  | prefix-hash | 76.5% | 60.3% | 5 s |
+  | approx-prefix-tree | 76.5% | 41.8% | 5 s |
+  | kv-aware-cost | 79.6% | 65.6% | 0 s |
+
+  This is one seed and one failure event, and a 5 s window holds only about 30 requests at 6 req/s, so differences of one or two windows in the recovery column are noise; the visible pattern is that kv-aware cost dips least and recovers first, and approx-prefix-tree dips most (it keeps remembering prefixes on the replica that came back empty). At 14 req/s every strategy recovers inside the first window. Not modelled: in-flight requests failing, client retries, a health-check delay before routing stops, or warm-up slower than cache refill.
 - Trace replay: `python sim/cache_router_sim.py --trace docs/example_trace.jsonl` replays a JSONL request trace (arrival time, session, prompt length, shared-prefix id) instead of the synthetic workload; the page has a matching "Load trace…" button. Format and caveats: [`docs/TRACE_FORMAT.md`](docs/TRACE_FORMAT.md). The shipped example is synthetic.
 
 ## Calibration
@@ -98,7 +110,7 @@ Scripts and raw CSVs are in [`bench/`](bench/); `python bench/fit_profile.py <cs
 
 - **FIFO prefill, no batching.** I prototyped a stepwise token-budget batching model (2,048 or 8,192 tokens per step, with the fixed cost either per request or shared per step) in [`bench/validate_batching.py`](bench/validate_batching.py) and scored it against two open-loop vLLM runs on one replica (70% hit / 30% miss traffic, 3–11 req/s, different seeds). It was not closer than FIFO: median error 14–16% vs 14.6% in run 1 and 19–22% vs 21% in run 2, which is inside the noise, so the engines keep FIFO. The larger problem is that the effective service speed differed by about 1.5x between those two runs on the same machine (best-fit slowdown 1.5 vs 1.0), and near saturation a few percent of service time swings queueing delay several-fold. Trust the ranking of strategies more than the absolute seconds, and treat queueing numbers near saturation as good to a factor of about two at best.
 - Cost constants are measured on one laptop GPU and one small model (see Calibration). The built-in defaults are still guesses.
-- The CPU offload tier's reload speed is an assumption, not a measurement, and it does not model PCIe contention with other transfers. No replica failures; the approximate router never forgets what it routed.
+- The CPU offload tier's reload speed is an assumption, not a measurement, and it does not model PCIe contention with other transfers. Replica failure is a simple graceful-drain model (see above) and is not wired into the page, only the CLI; the approximate router never forgets what it routed.
 
 ## Roadmap
 

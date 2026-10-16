@@ -54,6 +54,7 @@ def make_args(cfg: dict, rate: float, cpu_tokens: int = 0, cache_tokens: int | N
               duration: float | None = None) -> argparse.Namespace:
     return argparse.Namespace(
         cpu_tokens=cpu_tokens, reload_tps=cfg["reloadTps"],
+        fail_at=cfg["failAt"], fail_for=0, fail_replica=cfg["failReplica"],
         replicas=cfg["replicas"], cache_tokens=cache_tokens or cfg["cacheTokens"], duration=duration or cfg["duration"],
         products=cfg["products"], zipf=cfg["zipf"], sys_min=cfg["sysMin"], sys_max=cfg["sysMax"],
         max_turns=cfg["maxTurns"], think_time=cfg["think"], prefill_tps=cfg["tps"], overhead=cfg["overhead"], cached_tps=cfg["cachedTps"],
@@ -133,6 +134,12 @@ def run_python(cfg: dict) -> list[dict]:
             requests = sim.generate_workload(args)
             for cls in sim.STRATEGIES:
                 rows.append({**sim.simulate(cls, requests, args), "cpu": cpu, "wl": "syn"})
+        frate = cfg["rates"][-1]
+        fargs = make_args(cfg, frate, cpu)
+        fargs.fail_for = cfg["failFor"]
+        frequests = sim.generate_workload(fargs)
+        for cls in sim.STRATEGIES:
+            rows.append({**sim.simulate(cls, frequests, fargs), "cpu": cpu, "wl": "fail"})
         trate = len(trace_reqs) / info["duration"]
         targs = make_args(cfg, trate, cpu, cache_tokens=cfg["traceCacheTokens"], duration=info["duration"])
         for cls in sim.STRATEGIES:
@@ -174,6 +181,8 @@ def main() -> int:
         metrics = [("hit_rate", "hit_rate"), ("ttft_p50", "ttft_p50"), ("ttft_p99", "ttft_p99"), ("imbalance", "imbalance")]
         if cpu:  # the CPU-tier metric only exists (and is only compared) when the tier is on
             metrics.append(("cpu_hit_share", "cpu_hit_share"))
+        if wl == "fail":  # the failure metrics only exist when a failure is simulated
+            metrics += [("pre_hit", "pre_hit"), ("trough_hit", "trough_hit"), ("recovery_s", "recovery_s")]
         for metric, py_field in metrics:
             a, b = js_row[metric], py_row[py_field]
             ok = rel_close(a, b, METRIC_TOL)

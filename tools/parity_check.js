@@ -30,6 +30,7 @@ function baseCfg(rate, cpuTokens = 0) {
     tps: cfgFile.tps, overhead: cfgFile.overhead, cachedTps: cfgFile.cachedTps, thresh: cfgFile.thresh, slack: cfgFile.slack,
     duration: cfgFile.duration, replicas: cfgFile.replicas, cacheTokens: cfgFile.cacheTokens, rate,
     cpuTokens, reloadTps: cfgFile.reloadTps,
+    failAt: cfgFile.failAt, failFor: 0, failReplica: cfgFile.failReplica,
   };
 }
 
@@ -62,6 +63,19 @@ for (const cpu of cfgFile.cpuTokensList) {
       for (const q of W.reqs) f.serve(q);
       const sum = f.summary(cfg.duration);
       rows.push({ wl: "syn", id: s.id, rate, cpu, hit_rate: sum.hit, ttft_p50: sum.p50, ttft_p99: sum.p99, imbalance: sum.imb, cpu_hit_share: sum.cpuShare });
+    }
+  }
+  // replica failure: one replica dies and returns empty; compares hit-rate dip and recovery too
+  {
+    const frate = cfgFile.rates[cfgFile.rates.length - 1];
+    const fcfg = Object.assign(baseCfg(frate, cpu), { failFor: cfgFile.failFor });
+    const W = E.makeWorkload(fcfg);
+    for (const s of E.STRATS) {
+      const f = new E.Fleet(fcfg, s.id);
+      for (const q of W.reqs) f.serve(q);
+      const sum = f.summary(fcfg.duration);
+      rows.push({ wl: "fail", id: s.id, rate: frate, cpu, hit_rate: sum.hit, ttft_p50: sum.p50, ttft_p99: sum.p99, imbalance: sum.imb, cpu_hit_share: sum.cpuShare,
+        pre_hit: sum.preHit, trough_hit: sum.troughHit, recovery_s: sum.recoveryS });
     }
   }
   // trace replay: same strategies over the example trace, small cache so evictions (and the CPU tier) matter

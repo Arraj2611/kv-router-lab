@@ -239,6 +239,7 @@ class Replica:
         self.cpu_capacity = cpu_capacity_blocks
         self.free_at = 0.0       # when the prefill queue drains
         self.busy_time = 0.0     # total prefill work done (s)
+        self.down = False        # failed replica: unroutable, caches empty (see apply_failure)
 
     def match(self, req: Request) -> int:
         """Number of leading blocks already cached, in the GPU tier or the CPU tier."""
@@ -278,6 +279,8 @@ class Replica:
             del self.cpu[next(iter(self.cpu))]
 
     def backlog(self, t: float) -> float:
+        if self.down:
+            return math.inf  # cost-based routers can never prefer a dead replica
         return max(0.0, self.free_at - t)
 
 
@@ -421,13 +424,75 @@ def percentile(values: list[float], q: float) -> float:
     return s[min(len(s) - 1, int(q * len(s)))]
 
 
+RECOVERY_WINDOW = 5.0    # seconds per hit-rate window (2 s was too noisy at low rates, 10 s hid the recovery)
+PRE_WINDOW = 120.0       # seconds before the failure used for the "before" hit rate
+RECOVERED_FRACTION = 0.95
+
+
+def apply_failure(reps: list[Replica], t: float, args, state: int) -> int:
+    """Replica failure: at fail_at the replica dies (both cache tiers lost, unroutable); at
+    fail_at + fail_for it returns empty with a drained queue. Work already admitted before the
+    failure still completes (a graceful-drain simplification: no request is dropped or retried).
+    state: 0 = not yet failed, 1 = down, 2 = recovered. Mirrored in Fleet.applyFailure (JS)."""
+    if args.fail_for <= 0:
+        return state
+    r = reps[args.fail_replica]
+    if state == 0 and t >= args.fail_at:
+        r.cache.clear()
+        r.cpu.clear()
+        r.down = True
+        state = 1
+    if state == 1 and t >= args.fail_at + args.fail_for:
+        r.down = False
+        r.free_at = args.fail_at + args.fail_for
+        state = 2
+    return state
+
+
+def failure_metrics(log: list[tuple[float, int, int]], args) -> dict:
+    """From (t, cached_tokens, prompt_tokens) per request: fleet hit rate in the 120 s before the failure,
+    the worst 10 s window from the failure on, and seconds after recovery until a 10 s window reaches
+    95% of the 'before' rate (-1 = not within the run). Mirrored in Fleet.summary (JS)."""
+    T, back = args.fail_at, args.fail_at + args.fail_for
+    pre_c = pre_t = 0
+    for t, c, n in log:
+        if max(0.0, T - PRE_WINDOW) <= t < T:
+            pre_c += c
+            pre_t += n
+    pre = pre_c / pre_t if pre_t else 0.0
+    trough_w: dict[int, list[int]] = {}
+    rec_w: dict[int, list[int]] = {}
+    for t, c, n in log:
+        if t >= T:
+            w = trough_w.setdefault(math.floor((t - T) / RECOVERY_WINDOW), [0, 0])
+            w[0] += c
+            w[1] += n
+        if t >= back:
+            w = rec_w.setdefault(math.floor((t - back) / RECOVERY_WINDOW), [0, 0])
+            w[0] += c
+            w[1] += n
+    trough = min((c / n for c, n in trough_w.values() if n), default=0.0)
+    recovery = -1.0
+    for k in sorted(rec_w):
+        c, n = rec_w[k]
+        if n and c / n >= RECOVERED_FRACTION * pre:
+            recovery = k * RECOVERY_WINDOW
+            break
+    return {"pre_hit": pre, "trough_hit": trough, "recovery_s": recovery}
+
+
 def simulate(strategy_cls, requests: list[Request], args) -> dict:
     reps = [Replica(args.cache_tokens // BLOCK, args.cpu_tokens // BLOCK) for _ in range(args.replicas)]
     router = strategy_cls(args.replicas, args)
     router.args = args
     ttfts, cached_total, cpu_total, prompt_total = [], 0, 0, 0
+    fail_state, log = 0, []
     for req in requests:
-        r = reps[router.route(req, req.t, reps)]
+        fail_state = apply_failure(reps, req.t, args, fail_state)
+        ri = router.route(req, req.t, reps)
+        if reps[ri].down:  # failover for strategies that ignore backlog: least-loaded live replica
+            ri = _least_loaded(req.t, reps)
+        r = reps[ri]
         n, on_cpu = r.probe(req)
         cached, reloaded = n * BLOCK, on_cpu * BLOCK
         work = prefill_seconds(req.tokens - cached, cached, args, reloaded)
@@ -439,6 +504,7 @@ def simulate(strategy_cls, requests: list[Request], args) -> dict:
         cached_total += cached
         cpu_total += reloaded
         prompt_total += req.tokens
+        log.append((req.t, cached, req.tokens))
     busy = [r.busy_time for r in reps]
     mean_busy = sum(busy) / len(busy)
     row = {
@@ -452,6 +518,8 @@ def simulate(strategy_cls, requests: list[Request], args) -> dict:
     }
     if args.cpu_tokens:  # extra column only when the tier is on, so default output is unchanged
         row["cpu_hit_share"] = cpu_total / cached_total if cached_total else 0.0
+    if args.fail_for > 0:  # likewise only when a failure is simulated
+        row.update(failure_metrics(log, args))
     return row
 
 
@@ -485,6 +553,11 @@ def main():
     ap.add_argument("--sys-max", type=int, default=6_000)
     ap.add_argument("--max-turns", type=int, default=9)
     ap.add_argument("--think-time", type=float, default=20, help="mean seconds between turns")
+    ap.add_argument("--fail-for", type=float, default=0,
+                    help="replica failure: seconds the replica stays down (0 = no failure). It dies at --fail-at, "
+                         "returns empty after this long; reports hit rate before, worst window, and seconds to recover")
+    ap.add_argument("--fail-at", type=float, default=300, help="replica failure: simulated time of the failure (s)")
+    ap.add_argument("--fail-replica", type=int, default=0, help="replica failure: which replica (0-based)")
     ap.add_argument("--cpu-tokens", type=int, default=0,
                     help="CPU offload tier capacity per replica (tokens); GPU evictions spill here. 0 = off")
     ap.add_argument("--reload-tps", type=float, default=40_000,
@@ -533,13 +606,16 @@ def main():
         print(f"\n{head if args.trace else head + str(len(requests)) + ' requests'} · {args.replicas} replicas · "
               f"{args.cache_tokens:,} cache tokens each")
         print(f"{'strategy':<20}{'hit rate':>9}{'TTFT p50':>10}{'TTFT p99':>10}{'imbalance':>11}{'util':>7}"
-              + (f"{'hits from CPU':>15}" if args.cpu_tokens else ""))
+              + (f"{'hits from CPU':>15}" if args.cpu_tokens else "")
+              + (f"{'hit before':>12}{'worst 10s':>11}{'recovery':>10}" if args.fail_for > 0 else ""))
         for cls in STRATEGIES:
             row = simulate(cls, requests, args)
             rows.append(row)
+            rec = "never" if args.fail_for > 0 and row["recovery_s"] < 0 else (f"{row['recovery_s']:.0f}s" if args.fail_for > 0 else "")
             print(f"{row['strategy']:<20}{row['hit_rate']:>9.1%}{row['ttft_p50']:>9.2f}s"
                   f"{row['ttft_p99']:>9.2f}s{row['imbalance']:>10.2f}x{row['utilization']:>7.0%}"
-                  + (f"{row['cpu_hit_share']:>15.1%}" if args.cpu_tokens else ""))
+                  + (f"{row['cpu_hit_share']:>15.1%}" if args.cpu_tokens else "")
+                  + (f"{row['pre_hit']:>12.1%}{row['trough_hit']:>11.1%}{rec:>10}" if args.fail_for > 0 else ""))
     if args.csv:
         with open(args.csv, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0]))

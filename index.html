@@ -315,8 +315,11 @@ class Replica {
     }
     while (g.size > this.cpuCap) { const h = g.keys().next().value; g.delete(h); this.cpuCat[this.catOf(h)]--; }
   }
-  backlog(t) { return Math.max(0, this.freeAt - t); }
+  backlog(t) { return this.down ? Infinity : Math.max(0, this.freeAt - t); }  // a failed replica is never the cheapest
 }
+function leastLoaded(t, R) { let b = 0; for (let r = 1; r < R.length; r++) if (R[r].backlog(t) < R[b].backlog(t)) b = r; return b; }
+// Replica failure (mirrors apply_failure / failure_metrics in sim/cache_router_sim.py).
+const RECOVERY_WINDOW = 5, PRE_WINDOW = 120, RECOVERED_FRACTION = 0.95;
 
 const STRATS = [
   { id: "rr", name: "Round-robin", desc: "<b>Round-robin</b> sends each request to the next replica in turn. Load stays even, but a chat's next turn usually lands on a replica that has never seen it." },
@@ -363,19 +366,48 @@ class Fleet {
   constructor(c, id) {
     this.c = c; this.R = []; for (let i = 0; i < c.replicas; i++) this.R.push(new Replica(Math.floor(c.cacheTokens / BLOCK), c.products, Math.floor((c.cpuTokens || 0) / BLOCK)));
     this.route = makeRouter(id, c.replicas, c); this.ttft = []; this.hitTok = 0; this.cpuHitTok = 0; this.promptTok = 0;
+    this.failState = 0; this.log = [];  // failState: 0 not yet failed, 1 down, 2 recovered
+  }
+  // At failAt the replica dies (both cache tiers lost, unroutable); at failAt+failFor it returns empty with a
+  // drained queue. Work admitted before the failure still completes (graceful-drain simplification).
+  applyFailure(t) {
+    const c = this.c; if (!(c.failFor > 0)) return;
+    const r = this.R[c.failReplica || 0];
+    if (this.failState === 0 && t >= c.failAt) { r.cache.clear(); r.cpu.clear(); r.cat.fill(0); r.cpuCat.fill(0); r.down = true; this.failState = 1; }
+    if (this.failState === 1 && t >= c.failAt + c.failFor) { r.down = false; r.freeAt = c.failAt + c.failFor; this.failState = 2; }
+  }
+  failureMetrics() {
+    const T = this.c.failAt, back = T + this.c.failFor;
+    let preC = 0, preT = 0; const trough = new Map(), rec = new Map();
+    const add = (m, k, cc, n) => { const w = m.get(k) || [0, 0]; w[0] += cc; w[1] += n; m.set(k, w); };
+    for (const [t, cc, n] of this.log) {
+      if (Math.max(0, T - PRE_WINDOW) <= t && t < T) { preC += cc; preT += n; }
+      if (t >= T) add(trough, Math.floor((t - T) / RECOVERY_WINDOW), cc, n);
+      if (t >= back) add(rec, Math.floor((t - back) / RECOVERY_WINDOW), cc, n);
+    }
+    const pre = preT ? preC / preT : 0;
+    let worst = Infinity; for (const [cc, n] of trough.values()) if (n) worst = Math.min(worst, cc / n);
+    let recovery = -1;
+    for (const k of Array.from(rec.keys()).sort((a, b) => a - b)) { const [cc, n] = rec.get(k); if (n && cc / n >= RECOVERED_FRACTION * pre) { recovery = k * RECOVERY_WINDOW; break; } }
+    return { preHit: pre, troughHit: worst === Infinity ? 0 : worst, recoveryS: recovery };
   }
   serve(q) {
-    const ri = this.route(q, q.t, this.R), r = this.R[ri];
+    this.applyFailure(q.t);
+    let ri = this.route(q, q.t, this.R);
+    if (this.R[ri].down) ri = leastLoaded(q.t, this.R);  // failover for strategies that ignore backlog
+    const r = this.R[ri];
     const [m, oc] = r.probe(q), cached = m * BLOCK, reloaded = oc * BLOCK, work = prefillSeconds(this.c, q.tokens - cached, cached, reloaded);
     const start = Math.max(q.t, r.freeAt); r.freeAt = start + work; r.busy += work; r.admit(q);
     const tt = r.freeAt - q.t; this.ttft.push(tt);
+    this.log.push([q.t, cached, q.tokens]);
     this.hitTok += cached; this.cpuHitTok += reloaded; this.promptTok += q.tokens; r.hitTok += cached; r.promptTok += q.tokens; r.served++;
     return { ri, cached, tt };
   }
   summary(elapsed) {
     const s = this.ttft.slice().sort((a, b) => a - b), pct = x => s.length ? s[Math.min(s.length - 1, Math.floor(x * s.length))] : 0;
     const busy = this.R.map(r => r.busy), mean = busy.reduce((a, b) => a + b, 0) / busy.length;
-    return { hit: this.promptTok ? this.hitTok / this.promptTok : 0, cpuShare: this.hitTok ? this.cpuHitTok / this.hitTok : 0, p50: pct(.5), p99: pct(.99), imb: mean ? Math.max(...busy) / mean : 0, util: mean / elapsed };
+    const out = { hit: this.promptTok ? this.hitTok / this.promptTok : 0, cpuShare: this.hitTok ? this.cpuHitTok / this.hitTok : 0, p50: pct(.5), p99: pct(.99), imb: mean ? Math.max(...busy) / mean : 0, util: mean / elapsed };
+    return this.c.failFor > 0 ? Object.assign(out, this.failureMetrics()) : out;
   }
 }
 </script>
@@ -387,7 +419,7 @@ class Fleet {
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   const cfg = { seed: 7, products: 6, zipf: 1.2, sysMin: 1000, sysMax: 6000, maxTurns: 9, think: 20,
-    tps: 8000, overhead: 0.02, cachedTps: 0, cpuTokens: 0, reloadTps: 40000, thresh: 0.5, slack: 1.0, duration: 600, rate: 18, replicas: 4, cacheTokens: 60000 };
+    tps: 8000, overhead: 0.02, cachedTps: 0, cpuTokens: 0, reloadTps: 40000, failFor: 0, failAt: 300, failReplica: 0, thresh: 0.5, slack: 1.0, duration: 600, rate: 18, replicas: 4, cacheTokens: 60000 };
   const SPEEDS = [{ v: 2, l: "2×" }, { v: 6, l: "6×" }, { v: 20, l: "20×" }];
   const hashId = location.hash.slice(1);
   let strategy = E.STRATS.some(s => s.id === hashId) ? hashId : "kv", speed = 6;
