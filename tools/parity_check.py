@@ -54,7 +54,7 @@ def make_args(cfg: dict, rate: float) -> argparse.Namespace:
     return argparse.Namespace(
         replicas=cfg["replicas"], cache_tokens=cfg["cacheTokens"], duration=cfg["duration"],
         products=cfg["products"], zipf=cfg["zipf"], sys_min=cfg["sysMin"], sys_max=cfg["sysMax"],
-        max_turns=cfg["maxTurns"], think_time=cfg["think"], prefill_tps=cfg["tps"], overhead=cfg["overhead"],
+        max_turns=cfg["maxTurns"], think_time=cfg["think"], prefill_tps=cfg["tps"], overhead=cfg["overhead"], cached_tps=cfg["cachedTps"],
         match_threshold=cfg["thresh"], balance_slack=cfg["slack"], seed=cfg["seed"], rate=rate,
     )
 

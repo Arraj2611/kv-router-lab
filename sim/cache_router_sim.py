@@ -183,8 +183,14 @@ class Replica:
         return max(0.0, self.free_at - t)
 
 
-def prefill_seconds(tokens: int, args) -> float:
-    return args.overhead + tokens / args.prefill_tps
+def prefill_seconds(uncached: int, cached: int, args) -> float:
+    """overhead + uncached/prefill_tps + cached/cached_tps. cached_tps = 0 means cached tokens are free
+    (the original model). A real engine still pays to attend over a cached prefix, hence the term.
+    Operation order is mirrored exactly in the JS engine."""
+    t = args.overhead + uncached / args.prefill_tps
+    if args.cached_tps:
+        t += cached / args.cached_tps
+    return t
 
 
 def _least_loaded(t: float, reps: list[Replica]) -> int:
@@ -296,8 +302,8 @@ class KVAware:
         args = self.args
         best, best_cost = 0, float("inf")
         for r in range(len(reps)):
-            uncached = req.tokens - reps[r].match(req) * BLOCK
-            cost = prefill_seconds(uncached, args) + reps[r].backlog(t)
+            cached = reps[r].match(req) * BLOCK
+            cost = prefill_seconds(req.tokens - cached, cached, args) + reps[r].backlog(t)
             if cost < best_cost:
                 best_cost, best = cost, r
         return best
@@ -321,7 +327,7 @@ def simulate(strategy_cls, requests: list[Request], args) -> dict:
     for req in requests:
         r = reps[router.route(req, req.t, reps)]
         cached = r.match(req) * BLOCK
-        work = prefill_seconds(req.tokens - cached, args)
+        work = prefill_seconds(req.tokens - cached, cached, args)
         start = max(req.t, r.free_at)
         r.free_at = start + work
         r.busy_time += work
@@ -342,6 +348,22 @@ def simulate(strategy_cls, requests: list[Request], args) -> dict:
     }
 
 
+# Built-in defaults used when neither a flag nor a profile sets a value.
+DEFAULT_COST = {"prefill_tps": 8_000, "overhead": 0.02, "cached_tps": 0}
+
+# Measured constants for the per-replica cost model. Each entry says exactly what was measured;
+# a profile is only valid for that hardware/model/engine. Raw data and fit scripts: bench/.
+PROFILES = {
+    # RTX 4070 Laptop GPU (8 GB), driver 617.14, WSL2 Ubuntu 22.04, vLLM 0.31.0, Qwen2.5-1.5B-Instruct fp16,
+    # prefix caching on, max_model_len 8192, measured 2026-10-16. Fit: weighted least squares on relative
+    # error over the cold-length sweep and the cache-hit length sweep (bench/results/*vllm-0.31.0.csv).
+    "rtx4070-qwen1.5b-vllm": {"prefill_tps": 11_585, "overhead": 0.0177, "cached_tps": 248_713},
+    # Same hardware/model/dtype/context limit, SGLang 0.5.22 with RadixAttention (default backends,
+    # CUDA toolkit 13.0 for FlashInfer JIT), measured 2026-10-16.
+    "rtx4070-qwen1.5b-sglang": {"prefill_tps": 11_090, "overhead": 0.0197, "cached_tps": 293_103},
+}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--replicas", type=int, default=4)
@@ -354,13 +376,22 @@ def main():
     ap.add_argument("--sys-max", type=int, default=6_000)
     ap.add_argument("--max-turns", type=int, default=9)
     ap.add_argument("--think-time", type=float, default=20, help="mean seconds between turns")
-    ap.add_argument("--prefill-tps", type=float, default=8_000, help="prefill tokens/s per replica")
-    ap.add_argument("--overhead", type=float, default=0.02, help="fixed seconds per request")
+    ap.add_argument("--profile", choices=sorted(PROFILES), help="load measured cost constants (flags below override it)")
+    ap.add_argument("--prefill-tps", type=float, default=None, help=f"prefill tokens/s per replica (default {DEFAULT_COST['prefill_tps']:,})")
+    ap.add_argument("--overhead", type=float, default=None, help=f"fixed seconds per request (default {DEFAULT_COST['overhead']})")
+    ap.add_argument("--cached-tps", type=float, default=None,
+                    help="tokens/s to attend over an already-cached prefix; 0 = cached tokens are free (default 0)")
     ap.add_argument("--match-threshold", type=float, default=0.5, help="approx tree: min prefix match ratio")
     ap.add_argument("--balance-slack", type=float, default=1.0, help="approx tree: max extra backlog (s)")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--csv", help="write results to this CSV file")
     args = ap.parse_args()
+    for key, fallback in DEFAULT_COST.items():  # precedence: explicit flag > profile > built-in default
+        if getattr(args, key) is None:
+            setattr(args, key, PROFILES[args.profile][key] if args.profile else fallback)
+    if args.profile:
+        print(f"profile {args.profile}: prefill_tps={args.prefill_tps:,.0f} overhead={args.overhead * 1000:.1f}ms "
+              f"cached_tps={args.cached_tps:,.0f}")
 
     rows = []
     for rate in [float(x) for x in args.rates.split(",")]:

@@ -27,7 +27,7 @@ function baseCfg(rate) {
   return {
     seed: cfgFile.seed, products: cfgFile.products, zipf: cfgFile.zipf,
     sysMin: cfgFile.sysMin, sysMax: cfgFile.sysMax, maxTurns: cfgFile.maxTurns, think: cfgFile.think,
-    tps: cfgFile.tps, overhead: cfgFile.overhead, thresh: cfgFile.thresh, slack: cfgFile.slack,
+    tps: cfgFile.tps, overhead: cfgFile.overhead, cachedTps: cfgFile.cachedTps, thresh: cfgFile.thresh, slack: cfgFile.slack,
     duration: cfgFile.duration, replicas: cfgFile.replicas, cacheTokens: cfgFile.cacheTokens, rate,
   };
 }

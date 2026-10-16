@@ -10,6 +10,7 @@
   "think": 20,
   "tps": 8000,
   "overhead": 0.02,
+  "cachedTps": 250000,
   "thresh": 0.5,
   "slack": 1.0,
   "replicas": 4,
