@@ -153,43 +153,66 @@ def generate_workload(args) -> list[Request]:
 # --------------------------------------------------------------------------- replicas
 
 class Replica:
-    def __init__(self, capacity_blocks: int):
+    def __init__(self, capacity_blocks: int, cpu_capacity_blocks: int = 0):
         self.cache: dict[int, None] = {}  # insertion order = LRU order; front = evicted first
         self.capacity = capacity_blocks
+        # CPU offload tier: GPU evictions spill here (own LRU, own capacity). 0 = tier disabled.
+        self.cpu: dict[int, None] = {}
+        self.cpu_capacity = cpu_capacity_blocks
         self.free_at = 0.0       # when the prefill queue drains
         self.busy_time = 0.0     # total prefill work done (s)
 
     def match(self, req: Request) -> int:
-        """Number of leading blocks already cached."""
-        n = 0
+        """Number of leading blocks already cached, in the GPU tier or the CPU tier."""
+        return self.probe(req)[0]
+
+    def probe(self, req: Request) -> tuple[int, int]:
+        """(leading cached blocks in either tier, how many of those are only on the CPU tier)."""
+        n = on_cpu = 0
         for i in range(req.n):
-            if _bh(req.sys_full, req.product, req.session, i) not in self.cache:
+            h = _bh(req.sys_full, req.product, req.session, i)
+            if h in self.cache:
+                pass
+            elif h in self.cpu:
+                on_cpu += 1
+            else:
                 break
             n += 1
-        return n
+        return n, on_cpu
 
     def admit(self, req: Request) -> None:
         # Touch deepest blocks first so the shared beginning ends up most recent:
         # leaves are evicted before the prefixes they hang off.
+        # A block found on the CPU tier is reloaded: it leaves the CPU tier and re-enters the GPU.
         for i in range(req.n - 1, -1, -1):
             h = _bh(req.sys_full, req.product, req.session, i)
             if h in self.cache:
                 del self.cache[h]
+            elif h in self.cpu:
+                del self.cpu[h]
             self.cache[h] = None
         while len(self.cache) > self.capacity:
-            self.cache.pop(next(iter(self.cache)))
+            evicted = next(iter(self.cache))
+            del self.cache[evicted]
+            if self.cpu_capacity:
+                self.cpu[evicted] = None
+        while len(self.cpu) > self.cpu_capacity:
+            del self.cpu[next(iter(self.cpu))]
 
     def backlog(self, t: float) -> float:
         return max(0.0, self.free_at - t)
 
 
-def prefill_seconds(uncached: int, cached: int, args) -> float:
-    """overhead + uncached/prefill_tps + cached/cached_tps. cached_tps = 0 means cached tokens are free
-    (the original model). A real engine still pays to attend over a cached prefix, hence the term.
-    Operation order is mirrored exactly in the JS engine."""
+def prefill_seconds(uncached: int, cached: int, args, reload: int = 0) -> float:
+    """overhead + uncached/prefill_tps + cached/cached_tps + reload/reload_tps.
+    cached_tps = 0 means cached tokens are free (the original model). A real engine still pays to
+    attend over a cached prefix, hence the term. `reload` is the part of `cached` that sat in the CPU
+    tier and must be copied back to the GPU first. Operation order is mirrored exactly in the JS engine."""
     t = args.overhead + uncached / args.prefill_tps
     if args.cached_tps:
         t += cached / args.cached_tps
+    if reload:
+        t += reload / args.reload_tps
     return t
 
 
@@ -302,8 +325,9 @@ class KVAware:
         args = self.args
         best, best_cost = 0, float("inf")
         for r in range(len(reps)):
-            cached = reps[r].match(req) * BLOCK
-            cost = prefill_seconds(req.tokens - cached, cached, args) + reps[r].backlog(t)
+            n, on_cpu = reps[r].probe(req)
+            cached = n * BLOCK
+            cost = prefill_seconds(req.tokens - cached, cached, args, on_cpu * BLOCK) + reps[r].backlog(t)
             if cost < best_cost:
                 best_cost, best = cost, r
         return best
@@ -320,24 +344,26 @@ def percentile(values: list[float], q: float) -> float:
 
 
 def simulate(strategy_cls, requests: list[Request], args) -> dict:
-    reps = [Replica(args.cache_tokens // BLOCK) for _ in range(args.replicas)]
+    reps = [Replica(args.cache_tokens // BLOCK, args.cpu_tokens // BLOCK) for _ in range(args.replicas)]
     router = strategy_cls(args.replicas, args)
     router.args = args
-    ttfts, cached_total, prompt_total = [], 0, 0
+    ttfts, cached_total, cpu_total, prompt_total = [], 0, 0, 0
     for req in requests:
         r = reps[router.route(req, req.t, reps)]
-        cached = r.match(req) * BLOCK
-        work = prefill_seconds(req.tokens - cached, cached, args)
+        n, on_cpu = r.probe(req)
+        cached, reloaded = n * BLOCK, on_cpu * BLOCK
+        work = prefill_seconds(req.tokens - cached, cached, args, reloaded)
         start = max(req.t, r.free_at)
         r.free_at = start + work
         r.busy_time += work
         r.admit(req)
         ttfts.append(r.free_at - req.t)
         cached_total += cached
+        cpu_total += reloaded
         prompt_total += req.tokens
     busy = [r.busy_time for r in reps]
     mean_busy = sum(busy) / len(busy)
-    return {
+    row = {
         "strategy": strategy_cls.name,
         "rate": args.rate,
         "hit_rate": cached_total / prompt_total,
@@ -346,6 +372,9 @@ def simulate(strategy_cls, requests: list[Request], args) -> dict:
         "imbalance": max(busy) / mean_busy if mean_busy else 0.0,
         "utilization": mean_busy / args.duration,
     }
+    if args.cpu_tokens:  # extra column only when the tier is on, so default output is unchanged
+        row["cpu_hit_share"] = cpu_total / cached_total if cached_total else 0.0
+    return row
 
 
 # Built-in defaults used when neither a flag nor a profile sets a value.
@@ -376,6 +405,11 @@ def main():
     ap.add_argument("--sys-max", type=int, default=6_000)
     ap.add_argument("--max-turns", type=int, default=9)
     ap.add_argument("--think-time", type=float, default=20, help="mean seconds between turns")
+    ap.add_argument("--cpu-tokens", type=int, default=0,
+                    help="CPU offload tier capacity per replica (tokens); GPU evictions spill here. 0 = off")
+    ap.add_argument("--reload-tps", type=float, default=40_000,
+                    help="tokens/s to copy cached blocks from the CPU tier back to the GPU (an unmeasured guess, "
+                         "chosen to be several times faster than recompute)")
     ap.add_argument("--profile", choices=sorted(PROFILES), help="load measured cost constants (flags below override it)")
     ap.add_argument("--prefill-tps", type=float, default=None, help=f"prefill tokens/s per replica (default {DEFAULT_COST['prefill_tps']:,})")
     ap.add_argument("--overhead", type=float, default=None, help=f"fixed seconds per request (default {DEFAULT_COST['overhead']})")
@@ -399,12 +433,14 @@ def main():
         requests = generate_workload(args)
         print(f"\nrate {rate:g} req/s · {len(requests)} requests · {args.replicas} replicas · "
               f"{args.cache_tokens:,} cache tokens each")
-        print(f"{'strategy':<20}{'hit rate':>9}{'TTFT p50':>10}{'TTFT p99':>10}{'imbalance':>11}{'util':>7}")
+        print(f"{'strategy':<20}{'hit rate':>9}{'TTFT p50':>10}{'TTFT p99':>10}{'imbalance':>11}{'util':>7}"
+              + (f"{'hits from CPU':>15}" if args.cpu_tokens else ""))
         for cls in STRATEGIES:
             row = simulate(cls, requests, args)
             rows.append(row)
             print(f"{row['strategy']:<20}{row['hit_rate']:>9.1%}{row['ttft_p50']:>9.2f}s"
-                  f"{row['ttft_p99']:>9.2f}s{row['imbalance']:>10.2f}x{row['utilization']:>7.0%}")
+                  f"{row['ttft_p99']:>9.2f}s{row['imbalance']:>10.2f}x{row['utilization']:>7.0%}"
+                  + (f"{row['cpu_hit_share']:>15.1%}" if args.cpu_tokens else ""))
     if args.csv:
         with open(args.csv, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0]))

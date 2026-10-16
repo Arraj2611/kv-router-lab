@@ -48,9 +48,9 @@ The current model serves prefill one request at a time, which inflates queues ne
 ## Phase 3 — Extensions
 
 ### 7. CPU offload tier
-- [ ] Evicted blocks spill to a CPU tier with its own capacity; reloading costs `tokens / reload_tps` (cheaper than recompute)
-- [ ] New metric: share of hits served from CPU
-- [ ] Shown in the page as a second, thinner bar under each GPU's cache
+- [x] Evicted blocks spill to a CPU tier with its own capacity; reloading costs `tokens / reload_tps` (cheaper than recompute) — both engines, `--cpu-tokens` / `--reload-tps`; reload speed is an unmeasured default (40k tok/s)
+- [x] New metric: share of hits served from CPU — `cpu_hit_share`; parity-checked with the tier off and on
+- [x] Shown in the page as a second, thinner bar under each GPU's cache — plus a "CPU offload" slider and the share in the hits card
 
 ### 8. Real trace replay
 - [ ] Accept a JSONL trace (timestamp, session id, prompt token count, shared-prefix id)

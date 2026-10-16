@@ -23,12 +23,13 @@ if (!m) {
 }
 const E = new Function(m[1] + "\nreturn { makeWorkload, Fleet, STRATS, BLOCK, rng };")();
 
-function baseCfg(rate) {
+function baseCfg(rate, cpuTokens = 0) {
   return {
     seed: cfgFile.seed, products: cfgFile.products, zipf: cfgFile.zipf,
     sysMin: cfgFile.sysMin, sysMax: cfgFile.sysMax, maxTurns: cfgFile.maxTurns, think: cfgFile.think,
     tps: cfgFile.tps, overhead: cfgFile.overhead, cachedTps: cfgFile.cachedTps, thresh: cfgFile.thresh, slack: cfgFile.slack,
     duration: cfgFile.duration, replicas: cfgFile.replicas, cacheTokens: cfgFile.cacheTokens, rate,
+    cpuTokens, reloadTps: cfgFile.reloadTps,
   };
 }
 
@@ -46,14 +47,16 @@ fs.writeFileSync(path.join(TOOLS, "golden_js.json"), JSON.stringify({ rVals, req
 
 // ---------- 2. full metrics at every configured rate
 const rows = [];
-for (const rate of cfgFile.rates) {
-  const cfg = baseCfg(rate);
-  const W = E.makeWorkload(cfg);
-  for (const s of E.STRATS) {
-    const f = new E.Fleet(cfg, s.id);
-    for (const q of W.reqs) f.serve(q);
-    const sum = f.summary(cfg.duration);
-    rows.push({ id: s.id, rate, hit_rate: sum.hit, ttft_p50: sum.p50, ttft_p99: sum.p99, imbalance: sum.imb });
+for (const cpu of cfgFile.cpuTokensList) {
+  for (const rate of cfgFile.rates) {
+    const cfg = baseCfg(rate, cpu);
+    const W = E.makeWorkload(cfg);
+    for (const s of E.STRATS) {
+      const f = new E.Fleet(cfg, s.id);
+      for (const q of W.reqs) f.serve(q);
+      const sum = f.summary(cfg.duration);
+      rows.push({ id: s.id, rate, cpu, hit_rate: sum.hit, ttft_p50: sum.p50, ttft_p99: sum.p99, imbalance: sum.imb, cpu_hit_share: sum.cpuShare });
+    }
   }
 }
 const outPath = path.join(TOOLS, "parity_js.json");
@@ -61,5 +64,5 @@ fs.writeFileSync(outPath, JSON.stringify(rows, null, 2));
 
 console.log(`wrote golden_js.json (1000 r() draws, 200 requests) and ${rows.length} rows to parity_js.json`);
 for (const row of rows) {
-  console.log(`${row.id.padEnd(8)} rate=${String(row.rate).padEnd(4)} hit=${(row.hit_rate * 100).toFixed(1)}%  p50=${row.ttft_p50.toFixed(4)}s  p99=${row.ttft_p99.toFixed(4)}s  imb=${row.imbalance.toFixed(4)}x`);
+  console.log(`${row.id.padEnd(8)} rate=${String(row.rate).padEnd(4)} cpu=${String(row.cpu).padEnd(6)} hit=${(row.hit_rate * 100).toFixed(1)}%  p50=${row.ttft_p50.toFixed(4)}s  p99=${row.ttft_p99.toFixed(4)}s  imb=${row.imbalance.toFixed(4)}x  cpuShare=${(row.cpu_hit_share * 100).toFixed(1)}%`);
 }

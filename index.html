@@ -150,6 +150,8 @@ th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
         <span class="range"><input type="range" id="reps" min="2" max="8" step="1" value="4"><output id="reps-out"></output></span></label>
       <label class="ctl" for="cache"><span class="ctl-label">KV cache per replica</span>
         <span class="range"><input type="range" id="cache" min="20000" max="140000" step="10000" value="60000"><output id="cache-out"></output></span></label>
+      <label class="ctl" for="cpu"><span class="ctl-label">CPU offload per replica</span>
+        <span class="range"><input type="range" id="cpu" min="0" max="200000" step="20000" value="0"><output id="cpu-out"></output></span></label>
       <div class="ctl"><span class="ctl-label" id="speed-label">Speed</span>
         <div class="seg" id="speed" role="group" aria-labelledby="speed-label"></div></div>
       <div class="ctl"><span class="ctl-label">&nbsp;</span>
@@ -167,7 +169,7 @@ th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
   </section>
 
   <section class="metrics" aria-label="Live metrics">
-    <div class="metric"><span class="k">Prompt tokens served from cache</span><span class="v" id="m-hit">–</span><span class="s">since start</span></div>
+    <div class="metric"><span class="k">Prompt tokens served from cache</span><span class="v" id="m-hit">–</span><span class="s" id="m-hit-s">since start</span></div>
     <div class="metric"><span class="k">Median time to first token</span><span class="v" id="m-p50">–</span><span class="s">last 500 requests</span></div>
     <div class="metric"><span class="k">Slowest 1% (p99 TTFT)</span><span class="v" id="m-p99">–</span><span class="s">last 500 requests</span></div>
     <div class="metric"><span class="k">Load imbalance</span><span class="v" id="m-imb">–</span><span class="s">busiest replica ÷ average</span></div>
@@ -197,8 +199,8 @@ th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
   </section>
 
   <section class="notes" aria-label="Model notes">
-    <p><b>How the model works.</b> Prompts are split into 16-token blocks. A block counts as cached only if every block before it is cached too, the way vLLM's chained block hashes work. Each replica runs prefill one request at a time and evicts least-recently-used blocks, oldest leaves first. Time to first token is queueing delay plus prefill of the uncached part; decoding is not modelled.</p>
-    <p><b>What it leaves out.</b> No batching, so queues grow faster than on a real engine near saturation: trust the ranking of strategies more than the absolute seconds. No cache offload tier, no replica failures, and the approximate router never forgets what it routed.</p>
+    <p><b>How the model works.</b> Prompts are split into 16-token blocks. A block counts as cached only if every block before it is cached too, the way vLLM's chained block hashes work. Each replica runs prefill one request at a time and evicts least-recently-used blocks, oldest leaves first. Time to first token is queueing delay plus prefill of the uncached part; decoding is not modelled. With <i>CPU offload</i> on, blocks evicted from the GPU spill into a CPU tier with its own capacity and LRU; a request that finds its prefix there pays to copy it back (assumed 40k tokens/s, an unmeasured guess) instead of recomputing it.</p>
+    <p><b>What it leaves out.</b> No batching, so queues grow faster than on a real engine near saturation: trust the ranking of strategies more than the absolute seconds. No replica failures, and the approximate router never forgets what it routed.</p>
   </section>
 </div>
 
@@ -206,9 +208,11 @@ th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
 const BLOCK = 16, SESS_BASE = 1e9;
 // overhead + uncached/tps + cached/cachedTps. cachedTps 0/undefined = cached tokens are free.
 // Operation order is mirrored exactly in sim/cache_router_sim.py (prefill_seconds).
-function prefillSeconds(c, uncached, cached) {
+// `reload` is the part of `cached` held in the CPU tier, copied back at reloadTps first.
+function prefillSeconds(c, uncached, cached, reload) {
   let t = c.overhead + uncached / c.tps;
   if (c.cachedTps) t += cached / c.cachedTps;
+  if (reload) t += reload / c.reloadTps;
   return t;
 }
 function rng(seed) { let a = seed >>> 0; return function () { a = (a + 0x6D2B79F5) >>> 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
@@ -240,13 +244,29 @@ function makeWorkload(c) {
 function bh(q, i) { return i < q.sysFull ? q.p * 100000 + i + 1 : SESS_BASE + q.sid * 10000 + i; }
 
 class Replica {
-  constructor(cap, P) { this.cache = new Map(); this.cap = cap; this.P = P; this.freeAt = 0; this.busy = 0; this.cat = new Array(P + 1).fill(0); this.hitTok = 0; this.promptTok = 0; this.served = 0; }
+  // cpuCap > 0 enables the CPU offload tier: GPU evictions spill to `cpu` (own LRU, own capacity).
+  constructor(cap, P, cpuCap) { this.cache = new Map(); this.cap = cap; this.cpu = new Map(); this.cpuCap = cpuCap || 0; this.P = P; this.freeAt = 0; this.busy = 0; this.cat = new Array(P + 1).fill(0); this.cpuCat = new Array(P + 1).fill(0); this.hitTok = 0; this.promptTok = 0; this.served = 0; }
   catOf(h) { return h < SESS_BASE ? Math.floor((h - 1) / 100000) : this.P; }
-  match(q) { let n = 0; const c = this.cache; for (let i = 0; i < q.n; i++) { if (!c.has(bh(q, i))) break; n++; } return n; }
+  // Leading blocks cached in either tier; probe() also reports how many of them are only on the CPU tier.
+  match(q) { return this.probe(q)[0]; }
+  probe(q) {
+    let n = 0, onCpu = 0; const c = this.cache, g = this.cpu;
+    for (let i = 0; i < q.n; i++) { const h = bh(q, i); if (c.has(h)) { } else if (g.has(h)) onCpu++; else break; n++; }
+    return [n, onCpu];
+  }
   admit(q) {
-    const c = this.cache;
-    for (let i = q.n - 1; i >= 0; i--) { const h = bh(q, i); if (c.has(h)) c.delete(h); else this.cat[this.catOf(h)]++; c.set(h, 1); }
-    while (c.size > this.cap) { const h = c.keys().next().value; c.delete(h); this.cat[this.catOf(h)]--; }
+    const c = this.cache, g = this.cpu;
+    // A block found on the CPU tier is reloaded: it leaves the CPU tier and re-enters the GPU.
+    for (let i = q.n - 1; i >= 0; i--) {
+      const h = bh(q, i);
+      if (c.has(h)) c.delete(h); else { this.cat[this.catOf(h)]++; if (g.has(h)) { g.delete(h); this.cpuCat[this.catOf(h)]--; } }
+      c.set(h, 1);
+    }
+    while (c.size > this.cap) {
+      const h = c.keys().next().value; c.delete(h); this.cat[this.catOf(h)]--;
+      if (this.cpuCap) { g.set(h, 1); this.cpuCat[this.catOf(h)]++; }
+    }
+    while (g.size > this.cpuCap) { const h = g.keys().next().value; g.delete(h); this.cpuCat[this.catOf(h)]--; }
   }
   backlog(t) { return Math.max(0, this.freeAt - t); }
 }
@@ -287,28 +307,28 @@ function makeRouter(id, n, c) {
   }
   return (q, t, R) => {
     let best = 0, bc = Infinity;
-    for (let r = 0; r < n; r++) { const cached = R[r].match(q) * BLOCK, cost = prefillSeconds(c, q.tokens - cached, cached) + R[r].backlog(t); if (cost < bc) { bc = cost; best = r; } }
+    for (let r = 0; r < n; r++) { const [m, oc] = R[r].probe(q), cached = m * BLOCK, cost = prefillSeconds(c, q.tokens - cached, cached, oc * BLOCK) + R[r].backlog(t); if (cost < bc) { bc = cost; best = r; } }
     return best;
   };
 }
 
 class Fleet {
   constructor(c, id) {
-    this.c = c; this.R = []; for (let i = 0; i < c.replicas; i++) this.R.push(new Replica(Math.floor(c.cacheTokens / BLOCK), c.products));
-    this.route = makeRouter(id, c.replicas, c); this.ttft = []; this.hitTok = 0; this.promptTok = 0;
+    this.c = c; this.R = []; for (let i = 0; i < c.replicas; i++) this.R.push(new Replica(Math.floor(c.cacheTokens / BLOCK), c.products, Math.floor((c.cpuTokens || 0) / BLOCK)));
+    this.route = makeRouter(id, c.replicas, c); this.ttft = []; this.hitTok = 0; this.cpuHitTok = 0; this.promptTok = 0;
   }
   serve(q) {
     const ri = this.route(q, q.t, this.R), r = this.R[ri];
-    const cached = r.match(q) * BLOCK, work = prefillSeconds(this.c, q.tokens - cached, cached);
+    const [m, oc] = r.probe(q), cached = m * BLOCK, reloaded = oc * BLOCK, work = prefillSeconds(this.c, q.tokens - cached, cached, reloaded);
     const start = Math.max(q.t, r.freeAt); r.freeAt = start + work; r.busy += work; r.admit(q);
     const tt = r.freeAt - q.t; this.ttft.push(tt);
-    this.hitTok += cached; this.promptTok += q.tokens; r.hitTok += cached; r.promptTok += q.tokens; r.served++;
+    this.hitTok += cached; this.cpuHitTok += reloaded; this.promptTok += q.tokens; r.hitTok += cached; r.promptTok += q.tokens; r.served++;
     return { ri, cached, tt };
   }
   summary(elapsed) {
     const s = this.ttft.slice().sort((a, b) => a - b), pct = x => s.length ? s[Math.min(s.length - 1, Math.floor(x * s.length))] : 0;
     const busy = this.R.map(r => r.busy), mean = busy.reduce((a, b) => a + b, 0) / busy.length;
-    return { hit: this.promptTok ? this.hitTok / this.promptTok : 0, p50: pct(.5), p99: pct(.99), imb: mean ? Math.max(...busy) / mean : 0, util: mean / elapsed };
+    return { hit: this.promptTok ? this.hitTok / this.promptTok : 0, cpuShare: this.hitTok ? this.cpuHitTok / this.hitTok : 0, p50: pct(.5), p99: pct(.99), imb: mean ? Math.max(...busy) / mean : 0, util: mean / elapsed };
   }
 }
 </script>
@@ -320,7 +340,7 @@ class Fleet {
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   const cfg = { seed: 7, products: 6, zipf: 1.2, sysMin: 1000, sysMax: 6000, maxTurns: 9, think: 20,
-    tps: 8000, overhead: 0.02, cachedTps: 0, thresh: 0.5, slack: 1.0, duration: 600, rate: 18, replicas: 4, cacheTokens: 60000 };
+    tps: 8000, overhead: 0.02, cachedTps: 0, cpuTokens: 0, reloadTps: 40000, thresh: 0.5, slack: 1.0, duration: 600, rate: 18, replicas: 4, cacheTokens: 60000 };
   const SPEEDS = [{ v: 2, l: "2×" }, { v: 6, l: "6×" }, { v: 20, l: "20×" }];
   const hashId = location.hash.slice(1);
   let strategy = E.STRATS.some(s => s.id === hashId) ? hashId : "kv", speed = 6;
@@ -371,9 +391,10 @@ class Fleet {
     $("rate-out").textContent = cfg.rate + " req/s";
     $("reps-out").textContent = cfg.replicas + " GPUs";
     $("cache-out").textContent = Math.round(cfg.cacheTokens / 1000) + "k tokens";
+    $("cpu-out").textContent = cfg.cpuTokens ? Math.round(cfg.cpuTokens / 1000) + "k tokens" : "off";
   }
   let debounce;
-  [["rate", "rate"], ["reps", "replicas"], ["cache", "cacheTokens"]].forEach(([id, key]) => {
+  [["rate", "rate"], ["reps", "replicas"], ["cache", "cacheTokens"], ["cpu", "cpuTokens"]].forEach(([id, key]) => {
     $(id).addEventListener("input", e => {
       cfg[key] = +e.target.value; syncOutputs();
       clearTimeout(debounce); debounce = setTimeout(() => { newWorkload(); resetLive(); runComparison(); }, 350);
@@ -387,7 +408,7 @@ class Fleet {
   function syncPlay() { $("play").textContent = playing ? "Pause" : done ? "Replay" : "Play"; }
 
   function cliCommand() {
-    return `python sim/cache_router_sim.py --replicas ${cfg.replicas} --cache-tokens ${cfg.cacheTokens} --duration ${cfg.duration} --rates ${cfg.rate}`;
+    return `python sim/cache_router_sim.py --replicas ${cfg.replicas} --cache-tokens ${cfg.cacheTokens} --duration ${cfg.duration} --rates ${cfg.rate}` + (cfg.cpuTokens ? ` --cpu-tokens ${cfg.cpuTokens}` : "");
   }
   function fallbackCopy(text) {
     const ta = document.createElement("textarea");
@@ -434,6 +455,7 @@ class Fleet {
     const hit = fleet.promptTok ? fleet.hitTok / fleet.promptTok : 0;
     const busy = fleet.R.map(r => r.busy), mean = busy.reduce((a, b) => a + b, 0) / busy.length;
     $("m-hit").textContent = fleet.promptTok ? fmtPct(hit) : "–";
+    $("m-hit-s").textContent = cfg.cpuTokens && fleet.hitTok ? `since start · ${fmtPct(fleet.cpuHitTok / fleet.hitTok)} of hits from CPU tier` : "since start";
     $("m-p50").textContent = recent.length ? fmtS(rollingPct(recent, .5)) : "–";
     $("m-p99").textContent = recent.length ? fmtS(rollingPct(recent, .99)) : "–";
     $("m-imb").textContent = mean > 0 ? (Math.max(...busy) / mean).toFixed(2) + "×" : "–";
@@ -456,7 +478,7 @@ class Fleet {
   function layoutStage() {
     const w = stage.parentElement.clientWidth - 36 || 600;
     const n = cfg.replicas, cols = Math.max(1, Math.min(n, Math.floor((w + 12) / 132))), rows = Math.ceil(n / cols);
-    const gap = 12, pw = (w - gap * (cols - 1)) / cols, ph = 132, top = 92;
+    const gap = 12, pw = (w - gap * (cols - 1)) / cols, ph = 132 + (cfg.cpuTokens ? 22 : 0), top = 92;
     SW = w; SH = top + rows * ph + (rows - 1) * gap + 4;
     const dpr = window.devicePixelRatio || 1;
     stage.width = Math.round(SW * dpr); stage.height = Math.round(SH * dpr); stage.style.height = SH + "px";
@@ -517,6 +539,17 @@ class Fleet {
         const n = R.cat[k]; if (!n) continue; const segW = pw * n / R.cap; if (segW < .5) continue;
         c.fillStyle = k === cfg.products ? T.session : T.p[k];
         rr(c, x, y, Math.max(1, segW - 2), 14, 2); c.fill(); x += segW;
+      }
+      if (cfg.cpuTokens) {  // CPU offload tier: second, thinner bar, same product colours
+        const by = y + 18; rr(c, px, by, pw, 6, 3); c.fillStyle = T.track; c.fill();
+        let cx = px;
+        for (let k = 0; k <= cfg.products; k++) {
+          const n = R.cpuCat[k]; if (!n) continue; const segW = pw * n / R.cpuCap; if (segW < .5) continue;
+          c.fillStyle = k === cfg.products ? T.session : T.p[k];
+          rr(c, cx, by, Math.max(1, segW - 1.5), 6, 1.5); c.fill(); cx += segW;
+        }
+        c.textAlign = "left"; c.fillStyle = T.muted; c.font = `400 10.5px ${T.body}`; c.fillText("CPU tier " + Math.round(R.cpu.size / R.cpuCap * 100) + "%", px, by + 18);
+        y += 22;
       }
       // hit rate
       y += 32; c.textAlign = "left"; c.fillStyle = T.ink2; c.font = `400 12px ${T.body}`; c.fillText("Cache hits", px, y);
@@ -631,7 +664,7 @@ class Fleet {
     const { results, n, cfg: c } = cmpResults, name = id => E.STRATS.find(s => s.id === id).name;
     const byP99 = results.slice().sort((a, b) => a.p99 - b.p99), best = byP99[0], worst = byP99[byP99.length - 1];
     $("verdict").innerHTML = `At ${c.rate} req/s on ${c.replicas} GPUs, <b>${name(best.id)}</b> keeps the slowest 1% of first tokens to ${fmtS(best.p99)}. <b>${name(worst.id)}</b> is worst at ${fmtS(worst.p99)}.`;
-    $("cmp-sub").textContent = `Each strategy ran the identical workload: ${fmtClock(c.duration)} minutes simulated, ${n.toLocaleString()} requests, ${Math.round(c.cacheTokens / 1000)}k-token KV cache per GPU. Hover a bar for every metric.`;
+    $("cmp-sub").textContent = `Each strategy ran the identical workload: ${fmtClock(c.duration)} minutes simulated, ${n.toLocaleString()} requests, ${Math.round(c.cacheTokens / 1000)}k-token KV cache per GPU${c.cpuTokens ? ` plus a ${Math.round(c.cpuTokens / 1000)}k-token CPU offload tier` : ""}. Hover a bar for every metric.`;
     const lo = 0.05, hi = Math.max(1, ...results.map(r => r.p99)) * 1.15;
     const logW = v => Math.max(0.01, (Math.log10(Math.max(lo, v)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)));
     fillBars($("bars-p99"), results, r => logW(r.p99), r => fmtS(r.p99));
@@ -643,7 +676,7 @@ class Fleet {
     box.querySelectorAll(".bar-row").forEach(e => e.remove());
     results.forEach(r => {
       const row = document.createElement("div"); row.className = "bar-row"; row.dataset.id = r.id;
-      row.title = `${E.STRATS.find(s => s.id === r.id).name}: cache hits ${fmtPct(r.hit)}, p50 ${fmtS(r.p50)}, p99 ${fmtS(r.p99)}, imbalance ${r.imb.toFixed(2)}×, utilization ${Math.round(r.util * 100)}%`;
+      row.title = `${E.STRATS.find(s => s.id === r.id).name}: cache hits ${fmtPct(r.hit)}, p50 ${fmtS(r.p50)}, p99 ${fmtS(r.p99)}, imbalance ${r.imb.toFixed(2)}×, utilization ${Math.round(r.util * 100)}%` + (cmpResults.cfg.cpuTokens ? `, ${fmtPct(r.cpuShare)} of hits from CPU tier` : "");
       row.innerHTML = `<span class="name">${E.STRATS.find(s => s.id === r.id).name}</span><span class="bar-track"><span class="bar-fill" style="width:${(frac(r) * 100).toFixed(1)}%"></span></span><span class="val">${label(r)}</span>`;
       box.appendChild(row);
     });

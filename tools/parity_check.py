@@ -50,8 +50,9 @@ def load_config() -> dict:
     return json.loads((TOOLS / "parity_config.json").read_text())
 
 
-def make_args(cfg: dict, rate: float) -> argparse.Namespace:
+def make_args(cfg: dict, rate: float, cpu_tokens: int = 0) -> argparse.Namespace:
     return argparse.Namespace(
+        cpu_tokens=cpu_tokens, reload_tps=cfg["reloadTps"],
         replicas=cfg["replicas"], cache_tokens=cfg["cacheTokens"], duration=cfg["duration"],
         products=cfg["products"], zipf=cfg["zipf"], sys_min=cfg["sysMin"], sys_max=cfg["sysMax"],
         max_turns=cfg["maxTurns"], think_time=cfg["think"], prefill_tps=cfg["tps"], overhead=cfg["overhead"], cached_tps=cfg["cachedTps"],
@@ -101,11 +102,12 @@ def check_golden(cfg: dict) -> bool:
 
 def run_python(cfg: dict) -> list[dict]:
     rows = []
-    for rate in cfg["rates"]:
-        args = make_args(cfg, rate)
-        requests = sim.generate_workload(args)
-        for cls in sim.STRATEGIES:
-            rows.append(sim.simulate(cls, requests, args))
+    for cpu in cfg["cpuTokensList"]:
+        for rate in cfg["rates"]:
+            args = make_args(cfg, rate, cpu)
+            requests = sim.generate_workload(args)
+            for cls in sim.STRATEGIES:
+                rows.append({**sim.simulate(cls, requests, args), "cpu": cpu})
     return rows
 
 
@@ -130,33 +132,39 @@ def main() -> int:
     problems = []
 
     # exact-ish metric comparison, matched by (rate, canonical strategy key)
-    py_by_key = {(row["rate"], PY_KEY[row["strategy"]]): row for row in py_rows}
-    js_by_key = {(row["rate"], JS_KEY[row["id"]]): row for row in js_rows}
-    print(f"\n{'rate':<6}{'strategy':<14}{'metric':<10}{'js':>14}{'py':>14}  status")
-    for (rate, key), js_row in sorted(js_by_key.items()):
-        py_row = py_by_key.get((rate, key))
+    py_by_key = {(row["rate"], row["cpu"], PY_KEY[row["strategy"]]): row for row in py_rows}
+    js_by_key = {(row["rate"], row["cpu"], JS_KEY[row["id"]]): row for row in js_rows}
+    if len(js_by_key) != len(py_by_key):
+        problems.append(f"row count differs: js={len(js_by_key)} py={len(py_by_key)}")
+    print(f"\n{'rate':<6}{'cpu':<7}{'strategy':<14}{'metric':<14}{'js':>14}{'py':>14}  status")
+    for (rate, cpu, key), js_row in sorted(js_by_key.items()):
+        py_row = py_by_key.get((rate, cpu, key))
         if py_row is None:
-            problems.append(f"rate={rate} {key}: no matching Python row")
+            problems.append(f"rate={rate} cpu={cpu} {key}: no matching Python row")
             continue
-        for metric, py_field in [("hit_rate", "hit_rate"), ("ttft_p50", "ttft_p50"), ("ttft_p99", "ttft_p99"), ("imbalance", "imbalance")]:
+        metrics = [("hit_rate", "hit_rate"), ("ttft_p50", "ttft_p50"), ("ttft_p99", "ttft_p99"), ("imbalance", "imbalance")]
+        if cpu:  # the CPU-tier metric only exists (and is only compared) when the tier is on
+            metrics.append(("cpu_hit_share", "cpu_hit_share"))
+        for metric, py_field in metrics:
             a, b = js_row[metric], py_row[py_field]
             ok = rel_close(a, b, METRIC_TOL)
-            print(f"{rate:<6}{key:<14}{metric:<10}{a:>14.6f}{b:>14.6f}  {'OK' if ok else 'MISMATCH'}")
+            print(f"{rate:<6}{cpu:<7}{key:<14}{metric:<14}{a:>14.6f}{b:>14.6f}  {'OK' if ok else 'MISMATCH'}")
             if not ok:
-                problems.append(f"rate={rate} {key} {metric}: js={a!r} py={b!r} (exceeds {METRIC_TOL:g} relative)")
+                problems.append(f"rate={rate} cpu={cpu} {key} {metric}: js={a!r} py={b!r} (exceeds {METRIC_TOL:g} relative)")
 
     # ranking, as a coarser secondary signal
-    for rate in cfg["rates"]:
-        js_rate = [row for row in js_rows if row["rate"] == rate]
-        py_rate = [row for row in py_rows if row["rate"] == rate]
-        for metric, js_field, py_field, reverse, label in [
-            ("ttft_p99", "ttft_p99", "ttft_p99", False, "p99 TTFT"),
-            ("hit_rate", "hit_rate", "hit_rate", True, "hit rate"),
-        ]:
-            js_rank = ranking(js_rate, JS_KEY, js_field, reverse)
-            py_rank = ranking(py_rate, PY_KEY, py_field, reverse)
-            if js_rank != py_rank:
-                problems.append(f"rate={rate} {label} ranking: js={js_rank} py={py_rank}")
+    for cpu in cfg["cpuTokensList"]:
+        for rate in cfg["rates"]:
+            js_rate = [row for row in js_rows if row["rate"] == rate and row["cpu"] == cpu]
+            py_rate = [row for row in py_rows if row["rate"] == rate and row["cpu"] == cpu]
+            for metric, js_field, py_field, reverse, label in [
+                ("ttft_p99", "ttft_p99", "ttft_p99", False, "p99 TTFT"),
+                ("hit_rate", "hit_rate", "hit_rate", True, "hit rate"),
+            ]:
+                js_rank = ranking(js_rate, JS_KEY, js_field, reverse)
+                py_rank = ranking(py_rate, PY_KEY, py_field, reverse)
+                if js_rank != py_rank:
+                    problems.append(f"rate={rate} cpu={cpu} {label} ranking: js={js_rank} py={py_rank}")
 
     if problems:
         print(f"\n{len(problems)} problem(s):", file=sys.stderr)

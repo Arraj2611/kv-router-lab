@@ -62,6 +62,7 @@ Full numbers for three load levels are in [`sim/results.csv`](sim/results.csv).
 - Each replica runs prefill one request at a time and evicts least-recently-used blocks, leaves before shared prefixes.
 - Workload: six system prompts with Zipf popularity (one hot product) and multi-turn chats that grow every turn.
 - Time to first token = queueing delay + prefill time. Prefill time = `overhead + uncached_tokens / prefill_tps + cached_tokens / cached_tps`. The last term is the cost of attending over an already-cached prefix; it defaults to 0 (cached tokens free), which is what the table above uses. Decoding is not modelled.
+- Optional CPU offload tier (`--cpu-tokens N`, or the "CPU offload" slider on the page): blocks evicted from the GPU spill into a CPU tier with its own capacity and LRU. A request matches the leading blocks present in either tier; blocks found on the CPU are copied back at `--reload-tps` (default 40,000 tokens/s, an unmeasured guess chosen to be several times faster than recompute) and re-enter the GPU cache. `cpu_hit_share` reports what fraction of cached tokens came from the CPU tier. Off by default, so the results table above is unchanged. Example at 20 req/s with the default cost model: adding 60k tokens of CPU tier per replica raised kv-aware cost's hit rate from 70.9% to 78.8% (9% of hits came from the CPU) and cut p99 TTFT from 1.06 s to 0.63 s; the table of strategies at other sizes is one command away.
 
 ## Calibration
 
@@ -95,7 +96,7 @@ Scripts and raw CSVs are in [`bench/`](bench/); `python bench/fit_profile.py <cs
 
 - **FIFO prefill, no batching.** I prototyped a stepwise token-budget batching model (2,048 or 8,192 tokens per step, with the fixed cost either per request or shared per step) in [`bench/validate_batching.py`](bench/validate_batching.py) and scored it against two open-loop vLLM runs on one replica (70% hit / 30% miss traffic, 3–11 req/s, different seeds). It was not closer than FIFO: median error 14–16% vs 14.6% in run 1 and 19–22% vs 21% in run 2, which is inside the noise, so the engines keep FIFO. The larger problem is that the effective service speed differed by about 1.5x between those two runs on the same machine (best-fit slowdown 1.5 vs 1.0), and near saturation a few percent of service time swings queueing delay several-fold. Trust the ranking of strategies more than the absolute seconds, and treat queueing numbers near saturation as good to a factor of about two at best.
 - Cost constants are measured on one laptop GPU and one small model (see Calibration). The built-in defaults are still guesses.
-- No cache offload tier, no replica failures; the approximate router never forgets what it routed.
+- The CPU offload tier's reload speed is an assumption, not a measurement, and it does not model PCIe contention with other transfers. No replica failures; the approximate router never forgets what it routed.
 
 ## Roadmap
 
