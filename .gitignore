@@ -5,3 +5,5 @@ __pycache__/
 .claude/settings.local.json
 tools/parity_js.json
 tools/golden_js.json
+.gstack/
+.env
