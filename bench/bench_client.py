@@ -8,6 +8,7 @@ Standard library only. Three experiments, each appending rows to one CSV:
   shared  one long shared system prompt + short unique question, one at a time.
           Run against a server with prefix caching on, then off.
   load    same shared-prefix workload with N concurrent clients; reports throughput.
+  openloop  Poisson arrivals at several rates with mixed hit/miss traffic (validates queueing).
   hitsweep  cache-hit TTFT at several cached lengths with a fixed short tail.
   paired  alternates a cache hit and a matched-length cache miss in one time window, so
           drift (thermal, clocks, GPU sharing with Windows) cannot bias the comparison.
@@ -94,7 +95,10 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--engine", required=True, help="e.g. vllm-0.x.y or sglang-0.x.y")
     ap.add_argument("--prefix-caching", choices=["on", "off"], required=True)
-    ap.add_argument("--experiment", choices=["cold", "shared", "load", "paired", "hitsweep"], required=True)
+    ap.add_argument("--experiment", choices=["cold", "shared", "load", "paired", "hitsweep", "openloop"], required=True)
+    ap.add_argument("--rates", default="3,5,7,9,11", help="openloop: arrival rates to test (req/s)")
+    ap.add_argument("--duration", type=float, default=40, help="openloop: seconds per rate")
+    ap.add_argument("--miss-frac", type=float, default=0.3, help="openloop: fraction of requests that are cache misses")
     ap.add_argument("--hit-words", default="400,800,1600,2300,3400,4600", help="hitsweep: shared prefix sizes in words")
     ap.add_argument("--out", required=True, help="CSV file to append to")
     ap.add_argument("--n", type=int, default=30, help="requests per point (shared/load: total requests)")
@@ -129,6 +133,41 @@ def main():
             ttft, ptoks, cached = stream_ttft(host, port, args.model, prompt)
             rows.append({**meta, "point": target, "i": i, "kind": "miss", "prompt_tokens": ptoks,
                          "cached_tokens": cached or 0, "ttft_s": round(ttft, 5)})
+    elif args.experiment == "openloop":
+        # Open-loop Poisson arrivals (independent of completions) at each --rates value, mixed
+        # hit/miss traffic. This is what exposes queueing: a closed-loop client slows down when
+        # the server does and hides saturation. Written to its own CSV (extra arrival_s column).
+        system = "SYSTEM: " + make_text(rng, args.sys_words) + "\n"
+        stream_ttft(host, port, args.model, system + "prime")
+        for rate in [float(x) for x in args.rates.split(",")]:
+            t = 0.0
+            arrivals = []
+            while True:
+                t += rng.expovariate(rate)
+                if t > args.duration:
+                    break
+                is_miss = rng.random() < args.miss_frac
+                prompt = (f"u{rng.getrandbits(48):x} " + make_text(rng, args.sys_words + 20)) if is_miss else \
+                    system + f"Q{rng.getrandbits(32):x}: " + make_text(rng, 20)
+                arrivals.append((t, "miss" if is_miss else "hit", prompt))
+            lock = threading.Lock()
+            t0 = time.perf_counter()
+
+            def fire(i, at, kind, prompt):
+                delay = at - (time.perf_counter() - t0)
+                if delay > 0:
+                    time.sleep(delay)
+                ttft, ptoks, cached = stream_ttft(host, port, args.model, prompt)
+                with lock:
+                    rows.append({**meta, "point": rate, "i": i, "kind": kind, "prompt_tokens": ptoks,
+                                 "cached_tokens": cached or 0, "ttft_s": round(ttft, 5),
+                                 "arrival_s": round(at, 4)})
+
+            threads = [threading.Thread(target=fire, args=(i, *a)) for i, a in enumerate(arrivals)]
+            for th in threads: th.start()
+            for th in threads: th.join()
+            time.sleep(2)  # let the queue drain between rates
+        rows.sort(key=lambda r: (r["point"], r["i"]))
     elif args.experiment == "hitsweep":
         # Cache-hit TTFT vs cached length, with a fixed short unique tail. Distinguishes a cost
         # proportional to cached tokens from a flat per-request hit cost. Order is shuffled.

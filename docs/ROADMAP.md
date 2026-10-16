@@ -42,8 +42,8 @@ Goal: replace the guessed `--prefill-tps` and cache-hit savings with measured nu
 
 ### 6. Batching-aware prefill
 The current model serves prefill one request at a time, which inflates queues near saturation.
-- [ ] Model chunked or batched prefill with a token budget per step
-- [ ] Compare the old and new model against the Phase 2 measurements and keep whichever is closer
+- [x] Model chunked or batched prefill with a token budget per step — prototyped in `bench/validate_batching.py` (not in the engines)
+- [x] Compare the old and new model against the Phase 2 measurements and keep whichever is closer — no measurable difference (see README Limits), so FIFO is kept and the engines are unchanged. Measured with open-loop runs (`bench_client.py --experiment openloop`), two seeds.
 
 ## Phase 3 — Extensions
 
