@@ -158,6 +158,8 @@ th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
       <div class="ctl"><span class="ctl-label" id="trace-label">Workload</span>
         <div class="seg" role="group" aria-labelledby="trace-label"><button class="btn" id="trace-load" type="button">Load trace…</button><button class="btn" id="trace-clear" type="button" hidden>Use synthetic</button></div>
         <input type="file" id="trace-file" accept=".jsonl,.json,.txt" hidden></div>
+      <div class="ctl"><span class="ctl-label" id="fail-label">Failure</span>
+        <div class="seg" role="group" aria-labelledby="fail-label"><button type="button" id="fail-toggle" aria-pressed="false">Fail GPU 1</button></div></div>
       <div class="ctl"><span class="ctl-label">&nbsp;</span>
         <div class="seg"><button class="btn primary" id="play" type="button">Pause</button><button class="btn" id="reset" type="button">Restart</button><button class="btn" id="copy-settings" type="button">Copy settings</button></div></div>
     </div>
@@ -198,13 +200,13 @@ th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; }
     <p class="progress" id="progress" hidden></p>
     <details>
       <summary>Show all numbers as a table</summary>
-      <div class="tbl-wrap"><table id="tbl"><thead><tr><th>Strategy</th><th>Cache hits</th><th>TTFT p50</th><th>TTFT p99</th><th>Imbalance</th><th>Utilization</th></tr></thead><tbody></tbody></table></div>
+      <div class="tbl-wrap"><table id="tbl"><thead><tr><th>Strategy</th><th>Cache hits</th><th>TTFT p50</th><th>TTFT p99</th><th>Imbalance</th><th>Utilization</th><th class="fail-col" hidden>Hits before</th><th class="fail-col" hidden>Worst 5 s</th><th class="fail-col" hidden>Recovery</th></tr></thead><tbody></tbody></table></div>
     </details>
   </section>
 
   <section class="notes" aria-label="Model notes">
     <p><b>How the model works.</b> Prompts are split into 16-token blocks. A block counts as cached only if every block before it is cached too, the way vLLM's chained block hashes work. Each replica runs prefill one request at a time and evicts least-recently-used blocks, oldest leaves first. Time to first token is queueing delay plus prefill of the uncached part; decoding is not modelled. With <i>CPU offload</i> on, blocks evicted from the GPU spill into a CPU tier with its own capacity and LRU; a request that finds its prefix there pays to copy it back (assumed 40k tokens/s, an unmeasured guess) instead of recomputing it.</p>
-    <p><b>What it leaves out.</b> No batching, so queues grow faster than on a real engine near saturation: trust the ranking of strategies more than the absolute seconds. No replica failures, and the approximate router never forgets what it routed.</p>
+    <p><b>What it leaves out.</b> No batching, so queues grow faster than on a real engine near saturation: trust the ranking of strategies more than the absolute seconds. Replica failure is a simple graceful-drain model (work already accepted still finishes; no retries or health-check delay), and the approximate router never forgets what it routed.</p>
   </section>
 </div>
 
@@ -482,7 +484,14 @@ class Fleet {
   // ---------- trace replay: a parsed JSONL trace replaces the synthetic workload (see docs/TRACE_FORMAT.md)
   const synthetic = { products: cfg.products, duration: cfg.duration };
   function showTraceMsg(text, bad) { const m = $("trace-msg"); m.hidden = !text; m.textContent = text || ""; m.style.color = bad ? "var(--serious)" : ""; }
-  function applyWorkload() { syncOutputs(); newWorkload(); resetLive(); runComparison(); }
+  // Replica failure: GPU 1 dies at 40% of the run and returns empty after 20% (at most 120 s).
+  let failOn = false;
+  function syncFail() {
+    if (failOn) { cfg.failAt = cfg.duration * 0.4; cfg.failFor = Math.min(120, cfg.duration * 0.2); cfg.failReplica = 0; } else cfg.failFor = 0;
+    $("fail-toggle").setAttribute("aria-pressed", String(failOn));
+  }
+  function applyWorkload() { syncFail(); syncOutputs(); newWorkload(); resetLive(); runComparison(); }
+  $("fail-toggle").addEventListener("click", () => { failOn = !failOn; applyWorkload(); });
   $("trace-load").addEventListener("click", () => $("trace-file").click());
   $("trace-file").addEventListener("change", e => {
     const f = e.target.files[0]; e.target.value = ""; if (!f) return;
@@ -512,7 +521,8 @@ class Fleet {
 
   function cliCommand() {
     const load = cfg.trace ? `--trace YOUR_TRACE.jsonl` : `--duration ${cfg.duration} --rates ${cfg.rate}`;
-    return `python sim/cache_router_sim.py --replicas ${cfg.replicas} --cache-tokens ${cfg.cacheTokens} ${load}` + (cfg.cpuTokens ? ` --cpu-tokens ${cfg.cpuTokens}` : "");
+    return `python sim/cache_router_sim.py --replicas ${cfg.replicas} --cache-tokens ${cfg.cacheTokens} ${load}` + (cfg.cpuTokens ? ` --cpu-tokens ${cfg.cpuTokens}` : "")
+      + (cfg.failFor > 0 ? ` --fail-at ${cfg.failAt} --fail-for ${cfg.failFor} --fail-replica 0` : "");
   }
   function fallbackCopy(text) {
     const ta = document.createElement("textarea");
@@ -620,6 +630,7 @@ class Fleet {
     const t = simT;
     panels.forEach((p, i) => {
       const R = fleet.R[i]; if (!R) return;
+      c.save(); if (R.down) c.globalAlpha = 0.4;  // a failed replica is drawn dimmed, with a label on top
       const flash = Math.max(0, 1 - (now - flashes[i]) / 350);
       rr(c, p.x + .5, p.y + .5, p.w - 1, p.h - 1, 8); c.fillStyle = T.surface; c.fill();
       c.lineWidth = 1 + flash; c.strokeStyle = flash > 0 ? T.ink2 : T.line; c.stroke();
@@ -629,11 +640,11 @@ class Fleet {
       c.textAlign = "right"; c.fillStyle = T.muted; c.font = `400 11.5px ${T.mono}`;
       c.fillText(R.served.toLocaleString() + " req", px + pw, y);
       // queue
-      const bl = R.backlog(t), over = bl > 3;
+      const bl = R.down ? 0 : R.backlog(t), over = bl > 3;  // a down replica reports Infinity to the routers; show an empty queue
       y += 22; c.textAlign = "left"; c.fillStyle = T.ink2; c.font = `400 12px ${T.body}`; c.fillText("Queue", px, y);
       c.textAlign = "right"; c.fillStyle = over ? T.serious : T.ink; c.font = `500 12px ${T.mono}`;
       c.fillText((over ? "▲ " : "") + fmtS(bl), px + pw, y);
-      y += 6; const qScale = Math.max(4, ...fleet.R.map(r => r.backlog(t)));
+      y += 6; const qScale = Math.max(4, ...fleet.R.map(r => r.down ? 0 : r.backlog(t)));
       rr(c, px, y, pw, 6, 3); c.fillStyle = T.track; c.fill();
       if (bl > 0) { rr(c, px, y, Math.max(3, pw * bl / qScale), 6, 3); c.fillStyle = over ? T.serious : T.ink; c.fill(); }
       // cache
@@ -662,6 +673,13 @@ class Fleet {
       y += 32; c.textAlign = "left"; c.fillStyle = T.ink2; c.font = `400 12px ${T.body}`; c.fillText("Cache hits", px, y);
       c.textAlign = "right"; c.fillStyle = T.ink; c.font = `500 12px ${T.mono}`;
       c.fillText(R.promptTok ? fmtPct(R.hitTok / R.promptTok) : "–", px + pw, y);
+      c.restore();
+      if (R.down) {
+        rr(c, p.x + 10, p.y + p.h / 2 - 26, p.w - 20, 46, 6); c.fillStyle = T.surface; c.fill();  // backing so the label stays readable
+        c.textAlign = "center"; c.textBaseline = "middle"; c.fillStyle = T.serious;
+        c.font = `700 14px ${T.body}`; c.fillText("DOWN", p.x + p.w / 2, p.y + p.h / 2 - 8);
+        c.font = `400 11.5px ${T.mono}`; c.fillText("back in " + fmtS(Math.max(0, cfg.failAt + cfg.failFor - simT)), p.x + p.w / 2, p.y + p.h / 2 + 10);
+      }
     });
     // dots
     const life = 600;
@@ -702,6 +720,11 @@ class Fleet {
     c.strokeStyle = T.line; c.beginPath(); c.moveTo(TM.l, h - TM.b + .5); c.lineTo(w - TM.r, h - TM.b + .5); c.stroke();
     c.textAlign = "center"; c.textBaseline = "top"; c.fillStyle = T.muted;
     for (let m = 0; m <= cfg.duration / 60; m += 2) c.fillText(m + " min", S.x(m * 60), h - TM.b + 7);
+    if (cfg.failFor > 0) {  // outage band
+      const x0 = S.x(cfg.failAt), x1 = S.x(Math.min(cfg.duration, cfg.failAt + cfg.failFor));
+      c.fillStyle = T.grid; c.fillRect(x0, TM.t, x1 - x0, h - TM.t - TM.b);
+      c.fillStyle = T.muted; c.textAlign = "left"; c.textBaseline = "top"; c.font = `400 11px ${T.mono}`; c.fillText("GPU 1 down", x0 + 5, TM.t + 4);
+    }
     if (!trace.length) {
       c.fillStyle = T.muted; c.textBaseline = "middle"; c.font = `400 13px ${T.body}`;
       c.fillText("The line starts after the first two simulated seconds.", (TM.l + w - TM.r) / 2, (TM.t + h - TM.b) / 2);
@@ -771,19 +794,23 @@ class Fleet {
     const { results, n, cfg: c } = cmpResults, name = id => E.STRATS.find(s => s.id === id).name;
     const byP99 = results.slice().sort((a, b) => a.p99 - b.p99), best = byP99[0], worst = byP99[byP99.length - 1];
     $("verdict").innerHTML = `At ${c.trace ? c.rate.toFixed(1) + " req/s (replaying your trace)" : c.rate + " req/s"} on ${c.replicas} GPUs, <b>${name(best.id)}</b> keeps the slowest 1% of first tokens to ${fmtS(best.p99)}. <b>${name(worst.id)}</b> is worst at ${fmtS(worst.p99)}.`;
-    $("cmp-sub").textContent = `Each strategy ran the identical workload: ${fmtClock(c.duration)} minutes simulated, ${n.toLocaleString()} requests, ${Math.round(c.cacheTokens / 1000)}k-token KV cache per GPU${c.cpuTokens ? ` plus a ${Math.round(c.cpuTokens / 1000)}k-token CPU offload tier` : ""}. Hover a bar for every metric.`;
+    $("cmp-sub").textContent = `Each strategy ran the identical workload: ${fmtClock(c.duration)} minutes simulated, ${n.toLocaleString()} requests, ${Math.round(c.cacheTokens / 1000)}k-token KV cache per GPU${c.cpuTokens ? ` plus a ${Math.round(c.cpuTokens / 1000)}k-token CPU offload tier` : ""}${c.failFor > 0 ? `. GPU 1 fails at ${fmtClock(c.failAt)} and returns empty ${fmtClock(c.failFor)} later` : ""}. Hover a bar for every metric.`;
     const lo = 0.05, hi = Math.max(1, ...results.map(r => r.p99)) * 1.15;
     const logW = v => Math.max(0.01, (Math.log10(Math.max(lo, v)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)));
     fillBars($("bars-p99"), results, r => logW(r.p99), r => fmtS(r.p99));
     fillBars($("bars-hit"), results, r => r.hit, r => fmtPct(r.hit));
-    $("tbl").querySelector("tbody").innerHTML = results.map(r => `<tr><td>${name(r.id)}</td><td>${fmtPct(r.hit)}</td><td>${fmtS(r.p50)}</td><td>${fmtS(r.p99)}</td><td>${r.imb.toFixed(2)}×</td><td>${Math.round(r.util * 100)}%</td></tr>`).join("");
+    const fail = c.failFor > 0, rec = r => r.recoveryS < 0 ? "not within run" : r.recoveryS + " s";
+    document.querySelectorAll(".fail-col").forEach(th => { th.hidden = !fail; });
+    $("tbl").querySelector("tbody").innerHTML = results.map(r => `<tr><td>${name(r.id)}</td><td>${fmtPct(r.hit)}</td><td>${fmtS(r.p50)}</td><td>${fmtS(r.p99)}</td><td>${r.imb.toFixed(2)}×</td><td>${Math.round(r.util * 100)}%</td>`
+      + (fail ? `<td>${fmtPct(r.preHit)}</td><td>${fmtPct(r.troughHit)}</td><td>${rec(r)}</td>` : "") + `</tr>`).join("");
     markCurrent();
   }
   function fillBars(box, results, frac, label) {
     box.querySelectorAll(".bar-row").forEach(e => e.remove());
     results.forEach(r => {
       const row = document.createElement("div"); row.className = "bar-row"; row.dataset.id = r.id;
-      row.title = `${E.STRATS.find(s => s.id === r.id).name}: cache hits ${fmtPct(r.hit)}, p50 ${fmtS(r.p50)}, p99 ${fmtS(r.p99)}, imbalance ${r.imb.toFixed(2)}×, utilization ${Math.round(r.util * 100)}%` + (cmpResults.cfg.cpuTokens ? `, ${fmtPct(r.cpuShare)} of hits from CPU tier` : "");
+      row.title = `${E.STRATS.find(s => s.id === r.id).name}: cache hits ${fmtPct(r.hit)}, p50 ${fmtS(r.p50)}, p99 ${fmtS(r.p99)}, imbalance ${r.imb.toFixed(2)}×, utilization ${Math.round(r.util * 100)}%` + (cmpResults.cfg.cpuTokens ? `, ${fmtPct(r.cpuShare)} of hits from CPU tier` : "")
+        + (cmpResults.cfg.failFor > 0 ? `, hit rate ${fmtPct(r.preHit)} before the failure, ${fmtPct(r.troughHit)} in the worst 5 s window, ` + (r.recoveryS < 0 ? "not recovered within the run" : `recovered ${r.recoveryS} s after GPU 1 returned`) : "");
       row.innerHTML = `<span class="name">${E.STRATS.find(s => s.id === r.id).name}</span><span class="bar-track"><span class="bar-fill" style="width:${(frac(r) * 100).toFixed(1)}%"></span></span><span class="val">${label(r)}</span>`;
       box.appendChild(row);
     });

@@ -57,7 +57,7 @@ The current model serves prefill one request at a time, which inflates queues ne
 - [x] Document the format; ship a small anonymized example — `docs/TRACE_FORMAT.md`; the example is synthetic, not anonymized real traffic (no real traces available)
 
 ### 9. Replica failure
-- [x] Kill a replica at time T, bring it back empty at T+Δ; show how fast each strategy's hit rate recovers — both engines (`--fail-at/--fail-for/--fail-replica`), parity-checked (workload `fail`), CLI columns for hit rate before / worst window / recovery time. Graceful-drain simplification; not wired into the page UI (the JS engine supports it via `cfg.failFor`).
+- [x] Kill a replica at time T, bring it back empty at T+Δ; show how fast each strategy's hit rate recovers — both engines (`--fail-at/--fail-for/--fail-replica`), parity-checked (workload `fail`), CLI columns for hit rate before / worst window / recovery time. Graceful-drain simplification. Page: a "Fail GPU 1" toggle (fixed scenario: 40% of the run, for 20% of it, max 120 s) with a DOWN panel, outage band on the latency chart, and the three metrics in the comparison table; checked in a browser at desktop and 400 px.
 
 ## Phase 4 — Write-up
 

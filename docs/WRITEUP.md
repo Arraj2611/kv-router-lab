@@ -52,7 +52,7 @@ How accurate is it? For one request at a time, the median error on length sweeps
 
 - It is a simulation with one measured configuration (one laptop GPU, one small model, two engines at default settings). The built-in default constants are still guesses.
 - FIFO prefill, no batching, no decoding.
-- The reload speed for CPU offload is an assumption; replica failure is a graceful-drain model (admitted requests complete) and is not in the web UI.
+- The reload speed for CPU offload is an assumption; replica failure is a graceful-drain model (admitted requests complete), and the page offers only one fixed scenario (GPU 1 fails for 20% of the run).
 - The approximate-prefix-tree router never forgets what it routed, which exaggerates its weakness after evictions or failures.
 
 ## Reproduce
