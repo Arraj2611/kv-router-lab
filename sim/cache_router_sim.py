@@ -536,6 +536,10 @@ PROFILES = {
     # Same hardware/model/dtype/context limit, SGLang 0.5.22 with RadixAttention (default backends,
     # CUDA toolkit 13.0 for FlashInfer JIT), measured 2026-10-16.
     "rtx4070-qwen1.5b-sglang": {"prefill_tps": 11_090, "overhead": 0.0197, "cached_tps": 293_103},
+    # meta-llama/Llama-3.2-1B-Instruct, same hardware/dtype/context/versions, measured 2026-10-16 (a later
+    # session than the Qwen runs). Fit by bench/fit_profile.py from bench/results/meta-llama_*.csv.
+    "rtx4070-llama3.2-1b-vllm": {"prefill_tps": 16_949, "overhead": 0.0165, "cached_tps": 289_118},
+    "rtx4070-llama3.2-1b-sglang": {"prefill_tps": 16_998, "overhead": 0.0174, "cached_tps": 276_567},
 }
 
 

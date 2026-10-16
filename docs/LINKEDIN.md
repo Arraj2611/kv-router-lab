@@ -8,9 +8,9 @@ I built a simulator to answer one question about LLM serving: when you have seve
 
 It compares six strategies. The result that surprised me: prefix hashing gets almost the best cache hit rate (70.8% vs 70.9% for the best) and by far the worst latency, because the most popular system prompt pins one replica until its queue never drains. A router that scores each replica on "prefill saved vs queue wait" gets the reuse and the balance.
 
-To be clear: this is a simulation. It does not run a model. I did measure its cost constants on my own RTX 4070 laptop GPU with vLLM and SGLang (Qwen2.5-1.5B): about 11k tokens/s prefill, and caching a 2.4k-token prompt cut TTFT from 255 ms to 41 ms. Those measurements fixed a real flaw in my first model, which treated cached tokens as free and predicted a 26x speedup instead of ~6x.
+To be clear: this is a simulation. It does not run a model. I did measure its cost constants on my own RTX 4070 laptop GPU with vLLM and SGLang (Llama-3.2-1B and Qwen2.5-1.5B): about 11-17k tokens/s prefill, and caching a 2.4k-token prompt cut TTFT from 169 ms to 30 ms on Llama. Those measurements fixed a real flaw in my first model, which treated cached tokens as free and predicted a 26x speedup instead of ~6x.
 
-What it still gets wrong, stated in the repo: it under-predicts latency by 12-46% when cache hits and misses alternate (my laptop GPU's timing is bimodal and I did not find out why), it has no batching (I tested a batched model; it was no closer to the data), and queueing numbers near saturation are good to about a factor of two.
+What it still gets wrong, stated in the repo: on the Qwen runs it under-predicts latency by 12-46% when cache hits and misses alternate (my laptop GPU's timing was bimodal in that session and I did not find out why; the Llama runs were within 9%), it has no batching (I tested a batched model; it was no closer to the data), and queueing numbers near saturation are good to about a factor of two.
 
 Interactive demo, code, raw benchmark CSVs and the write-up are in the repo. The Python and JS engines are checked against each other in CI.
 

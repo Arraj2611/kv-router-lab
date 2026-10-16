@@ -80,31 +80,30 @@ Full numbers for three load levels are in [`sim/results.csv`](sim/results.csv).
 
 ## Calibration
 
-The default constants (`--prefill-tps 8000 --overhead 0.02`) were guesses. I measured the real thing once, on one machine, and shipped the result as opt-in profiles: `--profile rtx4070-qwen1.5b-vllm` or `--profile rtx4070-qwen1.5b-sglang`. The simulator is still a simulation; these profiles only set its per-replica cost constants.
+The default constants (`--prefill-tps 8000 --overhead 0.02`) were guesses. I measured the real thing once, on one machine, and shipped the result as opt-in profiles, one per model and engine: `--profile rtx4070-llama3.2-1b-vllm`, `rtx4070-llama3.2-1b-sglang`, `rtx4070-qwen1.5b-vllm`, `rtx4070-qwen1.5b-sglang`. The simulator is still a simulation; these profiles only set its per-replica cost constants.
 
-**What was measured.** RTX 4070 Laptop GPU (8 GB), driver 617.14, WSL2 Ubuntu 22.04, `Qwen/Qwen2.5-1.5B-Instruct` in fp16 (not Llama-3.2-1B: the gated repo was not accessible), 8192 context, vLLM 0.31.0 and SGLang 0.5.22, 2026-10-16. Requests used `max_tokens=1`, so TTFT is prefill time. One request at a time unless stated.
+**What was measured.** RTX 4070 Laptop GPU (8 GB), driver 617.14, WSL2 Ubuntu 22.04, two models in fp16, `meta-llama/Llama-3.2-1B-Instruct` and `Qwen/Qwen2.5-1.5B-Instruct`, each on vLLM 0.31.0 and SGLang 0.5.22, 8192 context, all on 2026-10-16. Qwen was run first (the Llama repo was not accessible yet) and Llama a few hours later, so they are separate sessions on the same machine. Requests used `max_tokens=1`, so TTFT is prefill time. One request at a time unless stated.
 - *Cold sweep:* unique prompts of 212 to 4,734 tokens, run in shuffled order (a cache miss).
 - *Hit sweep:* a cached prefix of 400 to 4,720 tokens plus a ~30-token unique tail (a cache hit).
 - *Held out, not used to fit:* a 2.4k-token shared-prefix run, and a paired run that alternates a hit with a matched-length miss.
 
 Scripts and raw CSVs are in [`bench/`](bench/); `python bench/fit_profile.py <csv>` reproduces the constants.
 
-| | vLLM 0.31.0 | SGLang 0.5.22 |
-|---|---|---|
-| Fixed cost per request | 17.7 ms | 19.7 ms |
-| Prefill speed | 11,585 tok/s | 11,090 tok/s |
-| Cost of a cached token | 4.0 µs (≈249k tok/s) | 3.4 µs (≈293k tok/s) |
-| Fit error on the sweeps (median / worst point) | 4.2% / 10.5% | 8.2% / 16.9% |
-| 2.4k-token cache hit, measured p50 | 32.6 ms | 32.1 ms |
-| 2.4k-token cache hit, model | 30.6 ms (-6%) | 30.2 ms (-6%) |
-| 2.4k-token miss in the paired run, measured p50 | 255 ms | 436 ms |
-| 2.4k-token miss, model | 224 ms (-12%) | 235 ms (-46%) |
+| | Llama-3.2-1B vLLM | Llama-3.2-1B SGLang | Qwen2.5-1.5B vLLM | Qwen2.5-1.5B SGLang |
+|---|---|---|---|---|
+| Fixed cost per request | 16.5 ms | 17.4 ms | 17.7 ms | 19.7 ms |
+| Prefill speed | 16,949 tok/s | 16,998 tok/s | 11,585 tok/s | 11,090 tok/s |
+| Cost of a cached token | 3.5 µs | 3.6 µs | 4.0 µs | 3.4 µs |
+| Fit error on the sweeps (median / worst point) | 5.2% / 10.6% | 5.0% / 9.6% | 4.2% / 10.5% | 8.2% / 16.9% |
+| 2.4k-token cache hit, model vs measured p50 | -2% | +1% | -6% | -6% |
+| 2.4k-token miss in the paired run, model vs measured p50 | -7% (157 vs 169 ms) | -1% (158 vs 160 ms) | -12% (224 vs 255 ms) | -46% (235 vs 436 ms) |
+| 2.4k-token hit in the paired run, model vs measured p50 | -9% | -3% | -26% | -38% |
 
-**Stated error.** For one request at a time, the calibrated model's median error on the length sweeps is 4–8% (worst single point 11–17%), and it is about 6% low on a 2.4k-token cache hit. When cache hits and misses alternate, it under-predicts by 12–46% on a miss and 26–38% on a hit. The cause is that TTFT on this laptop GPU is bimodal: the same 2.4k-token prompt takes about 230 ms or about 450 ms, and the slow mode shows up more in some runs than in others (a repeat of the SGLang paired run gave a 328 ms miss instead of 436 ms). The driver reported a software power cap during a third of the sampled intervals, which fits a power-limited laptop GPU, but SM clocks stayed high and I did not isolate the cause. Treat the constants as medians with roughly ±30% run-to-run spread.
+**Stated error.** For one request at a time, the calibrated model's median error on the length sweeps is 4–8% (worst single point 10–17%), and a 2.4k-token cache hit is within 6% of the model in all four setups. The alternating hit/miss case separates the two sessions. On Llama the model is within 9% (vLLM) and 3% (SGLang). On Qwen it under-predicts by 12–46% on a miss and 26–38% on a hit, because TTFT in that session was bimodal: the same 2.4k-token prompt took about 230 ms or about 450 ms, and the slow mode showed up more in some runs than others (a repeat of the SGLang paired run gave a 328 ms miss instead of 436 ms). Llama, run a few hours later on the same machine, showed no such slow mode in its p50s (p99s still spiked to 200–450 ms). The driver reported a software power cap during a third of the sampled intervals in the Qwen session, which fits a power-limited laptop GPU, but I did not isolate the cause, and each model is a single session, so I can't say whether the difference comes from the model or from the machine's state at the time. Treat the constants as medians with up to roughly ±30% run-to-run spread; the Llama profiles are the better-behaved ones.
 
-**What it changed.** Without a cached-token cost the model said caching speeds up a 2.4k-token prompt about 26x; vLLM measured about 6x (255 ms to 41 ms in the paired run). With the third term the model gives 7x on a quiet GPU, which is the case the constants were fit on. Under the measured profiles, kv-aware cost is still best and prefix-hash still worst by p99 TTFT at 6, 14 and 20 req/s; the four strategies in between change order.
+**What it changed.** Without a cached-token cost the model said caching speeds up a 2.4k-token prompt about 26x. Measured in the paired runs: about 6x on Qwen/vLLM (255 ms to 41 ms) and about 5.7x on Llama/vLLM (169 ms to 30 ms). With the third term the model gives about 7x (Qwen) and 5.8x (Llama), which is the case the constants were fit on. Under all four measured profiles, kv-aware cost is still best by p99 TTFT at 6, 14 and 20 req/s, and prefix-hash is still worst at 14 and 20 req/s. At 6 req/s prefix-hash is worst under the Qwen profiles but approx-prefix-tree is worst under the Llama ones; the strategies in between change order.
 
-**What it does not cover.** One model, one GPU, two engines at default settings plus `--enable-cache-report` on SGLang. Concurrent-load numbers varied too much between runs to report as constants (vLLM p50 at 8 clients ranged from 70 to 215 ms; at 11 req/s open-loop the hit p50 was 5.8 s in one run and 0.4 s in another), so queue lengths near saturation are only validated to roughly a factor of two (see Limits). The vLLM runs used the PyTorch sampler instead of FlashInfer's because the CUDA toolkit was not installed at the time; at `max_tokens=1` that should not affect prefill, but it is a difference from a default install.
+**What it does not cover.** Two small models on one GPU, two engines at default settings plus `--enable-cache-report` on SGLang; the open-loop queueing runs and the batching test used Qwen/vLLM only. Concurrent-load numbers varied too much between runs to report as constants (vLLM p50 at 8 clients ranged from 70 to 215 ms; at 11 req/s open-loop the hit p50 was 5.8 s in one run and 0.4 s in another), so queue lengths near saturation are only validated to roughly a factor of two (see Limits). The vLLM runs used the PyTorch sampler instead of FlashInfer's because the CUDA toolkit was not installed at the time; at `max_tokens=1` that should not affect prefill, but it is a difference from a default install.
 
 ## Limits
 

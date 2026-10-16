@@ -27,15 +27,15 @@ At 20 req/s on 4 replicas with 60k-token caches (seed 7, default cost model):
 | Approximate prefix tree | 69.2% | 0.41 s | 2.55 s |
 | **KV-aware cost** | **70.9%** | **0.23 s** | **1.06 s** |
 
-Prefix hash has nearly the best hit rate and by far the worst latency: the hot prompt's replica never drains. The absolute seconds near saturation should not be trusted (see limits); the ranking is the claim. Under the measured cost constants below, KV-aware cost is still best and prefix hash still worst by p99 TTFT at 6, 14 and 20 req/s.
+Prefix hash has nearly the best hit rate and by far the worst latency: the hot prompt's replica never drains. The absolute seconds near saturation should not be trusted (see limits); the ranking is the claim. Under the four measured cost profiles below, KV-aware cost is still best by p99 TTFT at 6, 14 and 20 req/s, and prefix hash is still worst at 14 and 20 (at 6 req/s the worst is prefix hash under the Qwen profiles and the approximate prefix tree under the Llama ones).
 
 ## Calibration against real engines
 
-I replaced the guessed prefill speed with measurements: vLLM 0.31.0 and SGLang 0.5.22 on an RTX 4070 Laptop GPU (8 GB, WSL2), serving Qwen2.5-1.5B-Instruct in fp16 (the Llama repo I wanted was not accessible). Both engines gave about the same constants: roughly 18-20 ms fixed cost per request, about 11-11.6k tokens/s prefill, and about 3.4-4 microseconds per cached token for attending over a cached prefix.
+I replaced the guessed prefill speed with measurements: vLLM 0.31.0 and SGLang 0.5.22 on an RTX 4070 Laptop GPU (8 GB, WSL2), serving two models in fp16, Llama-3.2-1B-Instruct and Qwen2.5-1.5B-Instruct (Qwen first, Llama a few hours later). The two engines agree closely on each model: roughly 16-20 ms fixed cost per request, about 17k tokens/s prefill for Llama and 11-11.6k for Qwen, and about 3.4-4 microseconds per cached token for attending over a cached prefix.
 
-That last term mattered. With cached tokens free, the model predicted caching would speed up a 2.4k-token prompt about 26x; vLLM measured about 6x (255 ms to 41 ms). The simulator now has a per-cached-token cost.
+That last term mattered. With cached tokens free, the model predicted caching would speed up a 2.4k-token prompt about 26x; vLLM measured about 6x on Qwen (255 ms to 41 ms) and 5.7x on Llama (169 ms to 30 ms). The simulator now has a per-cached-token cost.
 
-How accurate is it? For one request at a time, the median error on length sweeps is 4-8% and a 2.4k-token cache hit is about 6% low. When hits and misses alternate, it under-predicts by 12-46%, because TTFT on this laptop GPU is bimodal (the same prompt takes about 230 ms or about 450 ms) and I did not isolate why. Full method and numbers: the README's Calibration section and `bench/`.
+How accurate is it? For one request at a time, the median error on length sweeps is 4-8% and a 2.4k-token cache hit is within 6% in all four setups. When hits and misses alternate, the two sessions differ: on Llama the model is within 9% (vLLM) and 3% (SGLang), but on Qwen it under-predicts by 12-46%, because TTFT in that session was bimodal (the same prompt took about 230 ms or about 450 ms). I did not isolate why, and each model is one session, so I can't say whether it is the model or the machine's state at the time. Full method and numbers: the README's Calibration section and `bench/`.
 
 ## Things I tested that did not pan out
 
