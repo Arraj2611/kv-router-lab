@@ -62,5 +62,5 @@ The current model serves prefill one request at a time, which inflates queues ne
 ## Phase 4 — Write-up
 
 ### 10. Blog post / LinkedIn
-- [ ] Short write-up in `docs/WRITEUP.md`: problem, six strategies, results, calibration, limits
-- [ ] LinkedIn post with the GIF attached natively and the Pages link; says plainly that it is a simulation, calibrated on an RTX 4070 if Phase 2 is done
+- [x] Short write-up in `docs/WRITEUP.md`: problem, six strategies, results, calibration, limits
+- [x] LinkedIn post with the GIF attached natively and the Pages link; says plainly that it is a simulation, calibrated on an RTX 4070 if Phase 2 is done — drafted in `docs/LINKEDIN.md`; **not posted** (owner posts it)
