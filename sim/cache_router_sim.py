@@ -451,7 +451,7 @@ def apply_failure(reps: list[Replica], t: float, args, state: int) -> int:
 
 def failure_metrics(log: list[tuple[float, int, int]], args) -> dict:
     """From (t, cached_tokens, prompt_tokens) per request: fleet hit rate in the 120 s before the failure,
-    the worst 10 s window from the failure on, and seconds after recovery until a 10 s window reaches
+    the worst 5 s window from the failure on, and seconds after recovery until a 5 s window reaches
     95% of the 'before' rate (-1 = not within the run). Mirrored in Fleet.summary (JS)."""
     T, back = args.fail_at, args.fail_at + args.fail_for
     pre_c = pre_t = 0
@@ -611,7 +611,7 @@ def main():
               f"{args.cache_tokens:,} cache tokens each")
         print(f"{'strategy':<20}{'hit rate':>9}{'TTFT p50':>10}{'TTFT p99':>10}{'imbalance':>11}{'util':>7}"
               + (f"{'hits from CPU':>15}" if args.cpu_tokens else "")
-              + (f"{'hit before':>12}{'worst 10s':>11}{'recovery':>10}" if args.fail_for > 0 else ""))
+              + (f"{'hit before':>12}{'worst 5s':>11}{'recovery':>10}" if args.fail_for > 0 else ""))
         for cls in STRATEGIES:
             row = simulate(cls, requests, args)
             rows.append(row)
